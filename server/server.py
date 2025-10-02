@@ -18,7 +18,7 @@ import json
 
 app = FastAPI()
 
-AUDIO_DIR = '/path/to/your/audio/files'  # CHANGE THIS TO YOUR DIRECTORY
+AUDIO_DIR = '/mnt/data/video'  # CHANGE THIS TO YOUR DIRECTORY
 DB_FILE = 'inprogress.txt'
 LOCK_FILE = 'lock.file'
 LOG_DIR = './logs'
