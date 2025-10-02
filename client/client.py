@@ -69,7 +69,7 @@ while True:
         
         # Run whisper.cpp to generate VTT
         subprocess.check_call([
-            './main', '-m', 'models/ggml-medium.bin', '-f', 'temp.wav', '--language', language, '-ovtt'
+            './whisper.cpp/build/bin/whisper-cli', '-m', 'models/ggml-medium.bin', '-f', 'temp.wav', '--language', language, '-ovtt'
         ])
         
         # Read generated VTT (whisper.cpp outputs to <input>.vtt, i.e., temp.vtt)
