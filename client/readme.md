@@ -5,4 +5,4 @@ Download whisper.cpp from https://github.com/ggml-org/whisper.cpp/releases, go t
 Linux:
 Run the linux build script, choose a suitable backend or default (cpu) if unsure. The CPU backend is the slowest but the most reliable inference backend.
 
-The executable in both cases should be in whisper/whisper.cpp/build/bin/whisper-cli
+The executable in both cases should be in ```whisper/whisper.cpp/build/bin/whisper-cli```
