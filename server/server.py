@@ -18,10 +18,10 @@ import json
 
 app = FastAPI()
 
-AUDIO_DIR = '/mnt/data/video'  # CHANGE THIS TO YOUR DIRECTORY
-DB_FILE = 'inprogress.txt'
-LOCK_FILE = 'lock.file'
-LOG_DIR = './logs'
+AUDIO_DIR = os.getenv("AUDIO_DIR")  # CHANGE THIS TO YOUR DIRECTORY
+DB_FILE = os.getenv("DB_FILE",'inprogress.txt')
+LOCK_FILE = os.getenv("LOCK_FILE",'lock.file')
+LOG_DIR = os.getenv("LOG_DIR",'./logs')
 
 def log_message(msg: str):
     today = datetime.date.today().isoformat()

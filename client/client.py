@@ -24,9 +24,9 @@ import os
 from getpass import getpass
 
 # Configuration - CHANGE THESE
-SERVER_URL = 'https://your.server.example.com'  # Include protocol, no trailing slash
-USERNAME = 'your_username'  # Or input('Username: ')
-PASSWORD = 'your_password'  # Or getpass('Password: ')
+SERVER_URL = os.getenv("SERVER_URL", "https://your.server.example.com")  # Include protocol, no trailing slash
+USERNAME = os.getenv("USERNAME")
+PASSWORD = os.getenv("PASSWORD") or getpass("Password: ")  # Or getpass('Password: ')
 GET_ENDPOINT = '/task'
 POST_ENDPOINT = '/result'
 
