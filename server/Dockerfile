@@ -6,7 +6,7 @@
 # Expose port 8000 for uvicorn.
 # Mount volumes for audio files and logs when running.
 
-FROM python:3.10-slim
+FROM python:3.13-slim
 
 # Set working directory
 WORKDIR /app
@@ -31,9 +31,9 @@ CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
 # podman build -t whisper-server .
 
 # Example run command (mount your audio directory and logs):
-# docker run -d -p 8000:8000 -v /mnt/data/video:/mnt/data/video -v /path/to/logs:/app/logs whisper-server
+# docker run -d -p 8000:8000 -v ./logs:/app/logs:Z -v ./inprogress.txt:/app/inprogress.txt:Z -v /mnt/data/video:/mnt/data/video:Z whisper-server
 
 # For Podman:
-# podman run -d -p 8000:8000 -v /mnt/data/video:/mnt/data/video -v /path/to/logs:/app/logs whisper-server
+# podman run -d -p 8000:8000 -v ./logs:/app/logs:Z -v ./inprogress.txt:/app/inprogress.txt:Z -v /mnt/data/video:/mnt/data/video:Z whisper-server
 # Note: Replace /mnt/data/video with the actual host path to your MP3 files directory.
 # Ensure the container has read/write access to mounted volumes.

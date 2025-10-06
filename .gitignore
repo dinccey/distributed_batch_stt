@@ -209,3 +209,9 @@ __marimo__/
 
 # Additional
 server/test_video
+inprogress.txt
+temp.*
+processed.*
+*.log
+*.wav
+*.mp3
