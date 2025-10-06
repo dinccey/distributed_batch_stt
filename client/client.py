@@ -66,38 +66,12 @@ current_start_time = None
 current_process = None
 current_files = []
 
+interrupted = False
+
 def signal_handler(sig, frame):
-    print("Interrupted!")
-    if current_process is not None and current_process.poll() is None:
-        try:
-            current_process.terminate()
-            current_process.wait(timeout=5)
-        except:
-            current_process.kill()
-    if current_start_time is not None:
-        current_time_taken = time.time() - current_start_time
-    if current_task_id is not None:
-        log_to_csv(current_task_id, current_language, current_time_taken, current_audio_minutes, "failure", "Interrupted")
-        error_post_data = {'id': current_task_id}
-        error_post_kwargs = {'json': error_post_data}
-        if auth:
-            error_post_kwargs['auth'] = auth
-        try:
-            error_response = requests.post(error_url, **error_post_kwargs)
-            if error_response.status_code == 200:
-                print("Error reported to server")
-            else:
-                print(f"Failed to report error: {error_response.status_code}")
-                # If failed to report error, create empty file in not_processed_failed_report
-                with open(os.path.join('not_processed_failed_report', current_task_id), 'w') as _:
-                    pass
-        except Exception as ee:
-            print(f"Exception reporting error: {ee}")
-            # If failed to report error, create empty file in not_processed_failed_report
-            with open(os.path.join('not_processed_failed_report', current_task_id), 'w') as _:
-                pass
-        cleanup_files(current_files)
-    sys.exit(1)
+    global interrupted
+    print("Interrupted! The current processing will finish before exiting.")
+    interrupted = True
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
@@ -208,7 +182,7 @@ def retry_failed():
                     else:
                         print(f"Error retry attempt {attempt+1} for {task_id} failed with status {error_response.status_code}")
                 except Exception as ee:
-                    print(f"Error retry attempt {attempt+1} for {task_id} exception: {ee}")
+                    print(f"Error retry retry attempt {attempt+1} for {task_id} exception: {ee}")
                 time.sleep(5)
 
             if reported:
@@ -229,11 +203,15 @@ else:
             if response.status_code == 204:
                 print("No tasks available, sleeping 10s...")
                 time.sleep(10)
+                if interrupted:
+                    break
                 continue
             
             if response.status_code != 200:
                 print(f"Error getting task: {response.status_code}")
                 time.sleep(10)
+                if interrupted:
+                    break
                 continue
             
             task_id = response.headers.get('X-Task-ID')
@@ -241,6 +219,8 @@ else:
             if not task_id or not language:
                 print("Missing ID or language in response")
                 time.sleep(10)
+                if interrupted:
+                    break
                 continue
             
             print(f"Received task ID: {task_id}, Language: {language}")
@@ -323,6 +303,8 @@ else:
                 # Cleanup
                 cleanup_files(current_files)
                 time.sleep(10)
+                if interrupted:
+                    break
                 current_task_id = None
                 current_language = None
                 current_audio_minutes = 0.0
@@ -391,7 +373,12 @@ else:
             current_time_taken = 0.0
             current_start_time = None
             current_files = []
+            
+            if interrupted:
+                break
         
         except Exception as e:
             print(f"Exception in loop: {e}")
             time.sleep(10)
+            if interrupted:
+                break

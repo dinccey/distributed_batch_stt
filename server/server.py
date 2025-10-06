@@ -219,9 +219,8 @@ async def post_error(request: Request):
     finally:
         release_lock(fd, LOCK_FILE)
     
-    add_to_failed(matching_path)
     log_to_csv(matching_path, id_, request.client.host, error_msg)
     
-    log_message(f"Error reported for {matching_path} (ID: {id_}): {error_msg} from IP: {request.client.host}, removed from DB and added to failed")
+    log_message(f"Error reported for {matching_path} (ID: {id_}): {error_msg} from IP: {request.client.host}, removed from DB.")
     
     return {"status": "ok"}
