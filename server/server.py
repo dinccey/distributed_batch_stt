@@ -24,6 +24,7 @@ DB_FILE = os.getenv("DB_FILE", 'inprogress.txt')
 LOCK_FILE = os.getenv("LOCK_FILE", 'lock.file')
 LOG_DIR = os.getenv("LOG_DIR", './logs')
 CSV_FILE = 'processed.csv'
+FAILED_FILE = 'failed.txt'
 
 def log_message(msg: str):
     today = datetime.date.today().isoformat()
@@ -54,6 +55,14 @@ def log_to_csv(filepath: str, fileid: str, ip: str, error: str):
             writer.writerow(['filepath', 'fileid', 'ip', 'datetime', 'error'])
         writer.writerow([filepath, fileid, ip, now, error])
 
+def add_to_failed(path: str):
+    fd = acquire_lock(LOCK_FILE)
+    try:
+        with open(FAILED_FILE, 'a') as f:
+            f.write(f"{path}\n")
+    finally:
+        release_lock(fd, LOCK_FILE)
+
 def find_file_to_process(root_dir: str) -> Path | None:
     in_progress = set()
     if Path(DB_FILE).exists():
@@ -62,54 +71,74 @@ def find_file_to_process(root_dir: str) -> Path | None:
                 if ':' in line:
                     _, path = line.strip().split(':', 1)
                     in_progress.add(path)
+    failed = set()
+    if Path(FAILED_FILE).exists():
+        with open(FAILED_FILE, 'r') as f:
+            for line in f:
+                failed.add(line.strip())
     for file in sorted(Path(root_dir).rglob('*.mp3')):
         path_str = str(file)
         vtt = file.with_suffix('.vtt')
-        if not vtt.exists() and path_str not in in_progress:
+        if not vtt.exists() and path_str not in in_progress and path_str not in failed:
             return file
     return None
 
 @app.get("/task")
 def get_task(request: Request):
-    file = find_file_to_process(AUDIO_DIR)
-    if file is None:
-        log_message(f"No available file for IP: {request.client.host}")
-        return Response(status_code=204)
+    attempts = 0
+    max_attempts = 3  # Safety limit to prevent infinite loop
+    while attempts < max_attempts:
+        file = find_file_to_process(AUDIO_DIR)
+        if file is None:
+            log_message(f"No available file for IP: {request.client.host}")
+            return Response(status_code=204)
+        
+        path_str = str(file)
+        id_ = hashlib.md5(path_str.encode()).hexdigest()
+        json_file = file.with_suffix('.json')
+        
+        try:
+            if not json_file.exists():
+                raise ValueError("Missing JSON")
+            
+            lang_data = json.loads(json_file.read_text())
+            lang = lang_data.get('sql_params').get('language')
+            if not lang:
+                raise ValueError("Missing language key")
+        
+        except Exception as e:
+            error_str = str(e)
+            log_message(f"Error with JSON for {file}: {error_str} from IP: {request.client.host}")
+            log_to_csv(path_str, id_, request.client.host, error_str)
+            add_to_failed(path_str)
+            attempts += 1
+            continue
+        
+        # If we reach here, the file is good
+        fd = acquire_lock(LOCK_FILE)
+        try:
+            with open(DB_FILE, 'a') as f:
+                f.write(f"{id_}:{path_str}\n")
+        finally:
+            release_lock(fd, LOCK_FILE)
+        
+        log_message(f"Assigned file {path_str} (ID: {id_}, Lang: {lang}) to IP: {request.client.host}")
+        
+        headers = {
+            'X-Task-ID': id_,
+            'X-Language': lang
+        }
+        
+        def iterfile():
+            with open(file, "rb") as f:
+                while chunk := f.read(8192):
+                    yield chunk
+        
+        return StreamingResponse(iterfile(), media_type="audio/mpeg", headers=headers)
     
-    json_file = file.with_suffix('.json')
-    if not json_file.exists():
-        log_message(f"Missing JSON for {file} from IP: {request.client.host}")
-        raise HTTPException(status_code=500, detail="Missing language JSON")
-    
-    lang_data = json.loads(json_file.read_text())
-    lang = lang_data.get('sql_params').get('language')
-    if not lang:
-        log_message(f"Missing language key in JSON for {file} from IP: {request.client.host}")
-        raise HTTPException(status_code=500, detail="Missing language key")
-    
-    path_str = str(file)
-    id_ = hashlib.md5(path_str.encode()).hexdigest()
-    
-    fd = acquire_lock(LOCK_FILE)
-    try:
-        with open(DB_FILE, 'a') as f:
-            f.write(f"{id_}:{path_str}\n")
-    finally:
-        release_lock(fd, LOCK_FILE)
-    
-    log_message(f"Assigned file {path_str} (ID: {id_}, Lang: {lang}) to IP: {request.client.host}")
-    
-    headers = {
-        'X-Task-ID': id_,
-        'X-Language': lang
-    }
-    
-    def iterfile():
-        with open(file, "rb") as f:
-            while chunk := f.read(8192):
-                yield chunk
-    
-    return StreamingResponse(iterfile(), media_type="audio/mpeg", headers=headers)
+    # If max attempts reached, return no content
+    log_message(f"Max attempts reached for IP: {request.client.host}")
+    return Response(status_code=204)
 
 @app.post("/result")
 async def post_result(request: Request):
@@ -190,8 +219,9 @@ async def post_error(request: Request):
     finally:
         release_lock(fd, LOCK_FILE)
     
+    add_to_failed(matching_path)
     log_to_csv(matching_path, id_, request.client.host, error_msg)
     
-    log_message(f"Error reported for {matching_path} (ID: {id_}): {error_msg} from IP: {request.client.host}, removed from DB")
+    log_message(f"Error reported for {matching_path} (ID: {id_}): {error_msg} from IP: {request.client.host}, removed from DB and added to failed")
     
     return {"status": "ok"}
