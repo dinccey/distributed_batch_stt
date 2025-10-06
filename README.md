@@ -3,6 +3,10 @@
 
 This project provides a distributed batch audio transcription system using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for fast, local speech-to-text. It consists of a **client** (audio processor/uploader) and a **server** (task distributor/collector). The system is designed for Linux (Fedora recommended), but can be adapted for Mac and Windows.
 
+# How it works
+
+The server has access to a directory holding mp3 files and exposes 3 endpoints. The first endpoint when queried by the client finds an mp3 file without an accompanying vtt file. The language to be used for transcription is defined in the accompanying json file under sql_params/language (two letter ISO code). The client then transcodes the mp3 file into wav and runs inference via whisper.cpp. The client doesn't know the original filename, only a unique ID is provided whereby the job is tracked by the server in a .txt file (simple database). When the client is done processing, or encounters an error, it needs to send a POST request to one of the other endpoints, containing the ID of the job, and the server removes it from the db. The client writes all performed jobs to a csv file with some basic data that can be used to generate statistics for the client.
+
 ---
 
 ## 1. Client Setup
