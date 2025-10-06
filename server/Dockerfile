@@ -31,9 +31,9 @@ CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
 # podman build -t whisper-server .
 
 # Example run command (mount your audio directory and logs):
-# docker run -d -p 8000:8000 -v ./logs:/app/logs:Z -v ./inprogress.txt:/app/inprogress.txt:Z -v /mnt/data/video:/mnt/data/video:Z whisper-server
+# docker run -d -p 8000:8000 -v ./logs:/app/logs:Z -v ./inprogress.txt:/app/inprogress.txt:Z -v ./processed.csv:/app/processed.csv:Z -v /mnt/data/video:/mnt/data/video:Z whisper-server
 
 # For Podman:
-# podman run -d -p 8000:8000 -v ./logs:/app/logs:Z -v ./inprogress.txt:/app/inprogress.txt:Z -v /mnt/data/video:/mnt/data/video:Z whisper-server
+# podman run -d -p 8000:8000 -v ./logs:/app/logs:Z -v ./inprogress.txt:/app/inprogress.txt:Z -v ./processed.csv:/app/processed.csv:Z -v /mnt/data/video:/mnt/data/video:Z whisper-server
 # Note: Replace /mnt/data/video with the actual host path to your MP3 files directory.
 # Ensure the container has read/write access to mounted volumes.

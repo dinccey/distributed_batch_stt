@@ -15,13 +15,15 @@ import os
 import datetime
 from pathlib import Path
 import json
+import csv
 
 app = FastAPI()
 
-AUDIO_DIR = os.getenv("AUDIO_DIR")  # CHANGE THIS TO YOUR DIRECTORY
+AUDIO_DIR = os.getenv("AUDIO_DIR", '/mnt/data/video')  # CHANGE THIS TO YOUR DIRECTORY
 DB_FILE = os.getenv("DB_FILE", 'inprogress.txt')
 LOCK_FILE = os.getenv("LOCK_FILE", 'lock.file')
 LOG_DIR = os.getenv("LOG_DIR", './logs')
+CSV_FILE = 'processed.csv'
 
 def log_message(msg: str):
     today = datetime.date.today().isoformat()
@@ -43,6 +45,14 @@ def acquire_lock(lock_file: str, timeout: float = 4.0) -> int:
 def release_lock(fd: int, lock_file: str):
     os.close(fd)
     os.remove(lock_file)
+
+def log_to_csv(filepath: str, fileid: str, ip: str, error: str):
+    now = datetime.datetime.now().isoformat()
+    with open(CSV_FILE, 'a', newline='') as f:
+        writer = csv.writer(f)
+        if not os.path.exists(CSV_FILE) or os.path.getsize(CSV_FILE) == 0:
+            writer.writerow(['filepath', 'fileid', 'ip', 'datetime', 'error'])
+        writer.writerow([filepath, fileid, ip, now, error])
 
 def find_file_to_process(root_dir: str) -> Path | None:
     in_progress = set()
@@ -138,6 +148,8 @@ async def post_result(request: Request):
     vtt_path = Path(matching_path).with_suffix('.vtt')
     vtt_path.write_text(vtt_content)
     
+    log_to_csv(matching_path, id_, request.client.host, "")
+    
     log_message(f"Processed file {matching_path} (ID: {id_}), saved VTT to {vtt_path} from IP: {request.client.host}")
     
     return {"status": "ok"}
@@ -146,6 +158,7 @@ async def post_result(request: Request):
 async def post_error(request: Request):
     data = await request.json()
     id_ = data.get('id')
+    error_msg = data.get('error', 'Unknown error')
     if not id_:
         log_message(f"Invalid POST data for /error from IP: {request.client.host}")
         raise HTTPException(status_code=400, detail="Missing id")
@@ -158,9 +171,11 @@ async def post_error(request: Request):
         with open(DB_FILE, 'r') as f:
             lines = f.readlines()
         
+        matching_path = None
         found = False
         for line in lines:
             if line.startswith(id_ + ':'):
+                matching_path = line.strip().split(':', 1)[1]
                 found = True
                 break
         
@@ -175,6 +190,8 @@ async def post_error(request: Request):
     finally:
         release_lock(fd, LOCK_FILE)
     
-    log_message(f"Error reported for ID: {id_} from IP: {request.client.host}, removed from DB")
+    log_to_csv(matching_path, id_, request.client.host, error_msg)
+    
+    log_message(f"Error reported for {matching_path} (ID: {id_}): {error_msg} from IP: {request.client.host}, removed from DB")
     
     return {"status": "ok"}
