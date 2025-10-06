@@ -58,7 +58,18 @@ If you prefer, follow the [whisper.cpp instructions](https://github.com/ggergano
 
 ### B. Mac
 
-1. Download the latest whisper.cpp binary for Mac from [whisper.cpp releases](https://github.com/ggml-org/whisper.cpp/releases).
+1. Follow instructions in more detail: [whisper.cpp](https://github.com/ggml-org/whisper.cpp).
+```sh
+# Apple Silicon
+git clone https://github.com/ggerganov/whisper.cpp.git
+cd whisper.cpp
+cmake -B build
+cmake --build build --config Release
+```
+You might need to have Xcode and cmake 
+```sh 
+brew install cmake 
+```
 2. Place the binary as `client/whisper/whisper.cpp/build/bin/whisper-cli` (create the folder if needed).
 3. Ensure `ffmpeg` is installed (e.g., via Homebrew: `brew install ffmpeg`).
 
