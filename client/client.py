@@ -21,22 +21,57 @@ import requests
 import subprocess
 import time
 import os
+import csv
 from getpass import getpass
 
 # Configuration - CHANGE THESE
-SERVER_URL = os.getenv("SERVER_URL", "https://your.server.example.com")  # Include protocol, no trailing slash
+SERVER_URL = os.getenv("SERVER_URL", "http://localhost:8000")  # Include protocol, no trailing slash
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", 'false').lower() == 'true'
 USERNAME = os.getenv("USERNAME")
-PASSWORD = os.getenv("PASSWORD") or getpass("Password: ")  # Or getpass('Password: ')
+PASSWORD = None
+auth = None
+
+if AUTH_ENABLED:
+    if not USERNAME:
+        raise ValueError("AUTH_ENABLED is true but USERNAME environment variable is not set.")
+    PASSWORD = os.getenv("PASSWORD") or getpass("Password: ")
+    auth = (USERNAME, PASSWORD)
+
 GET_ENDPOINT = '/task'
 POST_ENDPOINT = '/result'
+ERROR_ENDPOINT = '/error'
 
-auth = (USERNAME, PASSWORD)
 get_url = SERVER_URL + GET_ENDPOINT
 post_url = SERVER_URL + POST_ENDPOINT
+error_url = SERVER_URL + ERROR_ENDPOINT
+
+def log_to_csv(file_id, language, time_taken, audio_minutes, status, reason):
+    fieldnames = ['file_id', 'language', 'time_taken', 'audio_minutes', 'status', 'reason']
+    file_exists = os.path.exists('processed.csv')
+    with open('processed.csv', 'a', newline='') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow({
+            'file_id': file_id,
+            'language': language,
+            'time_taken': time_taken,
+            'audio_minutes': audio_minutes,
+            'status': status,
+            'reason': reason
+        })
+
+def cleanup_files(files):
+    for f in files:
+        if os.path.exists(f):
+            os.remove(f)
 
 while True:
     try:
-        response = requests.get(get_url, auth=auth, stream=True)
+        kwargs = {'stream': True}
+        if auth:
+            kwargs['auth'] = auth
+        response = requests.get(get_url, **kwargs)
         
         if response.status_code == 204:
             print("No tasks available, sleeping 10s...")
@@ -57,37 +92,107 @@ while True:
         
         print(f"Received task ID: {task_id}, Language: {language}")
         
-        # Save MP3
-        with open('temp.mp3', 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+        mp3_file = f"{task_id}.mp3"
+        wav_file = f"{task_id}.wav"
+        vtt_file = f"{wav_file}.vtt"
         
-        # Convert MP3 to WAV (required for whisper.cpp)
-        subprocess.check_call([
-            'ffmpeg', '-i', 'temp.mp3', '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', 'temp.wav'
-        ])
+        audio_minutes = 0.0
+        time_taken = 0.0
         
-        # Run whisper.cpp to generate VTT
-        subprocess.check_call([
-            './whisper.cpp/build/bin/whisper-cli', '-m', 'models/ggml-medium.bin', '-f', 'temp.wav', '--language', language, '-ovtt'
-        ])
+        try:
+            # Save MP3
+            with open(mp3_file, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            # Get audio duration using ffprobe
+            duration_output = subprocess.check_output([
+                'ffprobe', '-i', mp3_file, '-show_entries', 'format=duration', '-v', 'quiet', '-of', 'csv=p=0'
+            ])
+            audio_seconds = float(duration_output.strip())
+            audio_minutes = audio_seconds / 60
+            
+            # Convert MP3 to WAV
+            subprocess.check_call([
+                'ffmpeg', '-y', '-i', mp3_file, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav_file
+            ])
+            
+            # Run whisper.cpp
+            start_time = time.time()
+            subprocess.check_call([
+                './whisper/whisper.cpp/build/bin/whisper-cli', '-m', './whisper/whisper.cpp/models/ggml-medium.bin', '-f', wav_file, '--language', language, '-ovtt'
+            ])
+            end_time = time.time()
+            time_taken = end_time - start_time
+            
+            # Read VTT
+            with open(vtt_file, 'r') as f:
+                vtt_content = f.read()
         
-        # Read generated VTT (whisper.cpp outputs to <input>.vtt, i.e., temp.vtt)
-        with open('temp.vtt', 'r') as f:
-            vtt_content = f.read()
+        except Exception as e:
+            print(f"Processing failed: {e}")
+            log_to_csv(task_id, language, time_taken, audio_minutes, "failure", str(e))
+            # Send to /error
+            error_post_data = {'id': task_id}
+            error_post_kwargs = {'json': error_post_data}
+            if auth:
+                error_post_kwargs['auth'] = auth
+            try:
+                error_response = requests.post(error_url, **error_post_kwargs)
+                if error_response.status_code == 200:
+                    print("Error reported to server")
+                else:
+                    print(f"Failed to report error: {error_response.status_code}")
+            except Exception as ee:
+                print(f"Exception reporting error: {ee}")
+            # Cleanup
+            cleanup_files([mp3_file, wav_file, vtt_file])
+            time.sleep(10)
+            continue
         
-        # Post result
-        post_data = {'id': task_id, 'vtt': vtt_content}
-        post_response = requests.post(post_url, json=post_data, auth=auth)
-        if post_response.status_code != 200:
-            print(f"Error posting result: {post_response.status_code}")
+        # Post result with retries
+        posted = False
+        for attempt in range(3):
+            try:
+                post_data = {'id': task_id, 'vtt': vtt_content}
+                post_kwargs = {'json': post_data}
+                if auth:
+                    post_kwargs['auth'] = auth
+                post_response = requests.post(post_url, **post_kwargs)
+                if post_response.status_code == 200:
+                    print("Result posted successfully")
+                    posted = True
+                    break
+                else:
+                    print(f"Post attempt {attempt+1} failed with status {post_response.status_code}")
+            except Exception as pe:
+                print(f"Post attempt {attempt+1} exception: {pe}")
+            time.sleep(5)
+        
+        if posted:
+            log_to_csv(task_id, language, time_taken, audio_minutes, "success", "")
         else:
-            print("Result posted successfully")
+            log_to_csv(task_id, language, time_taken, audio_minutes, "failure", "Failed to post result after 3 attempts")
+            # Save VTT locally
+            os.makedirs('failed_vtt', exist_ok=True)
+            if os.path.exists(vtt_file):
+                os.rename(vtt_file, f"failed_vtt/{task_id}.vtt")
+            # Send to /error
+            error_post_data = {'id': task_id}
+            error_post_kwargs = {'json': error_post_data}
+            if auth:
+                error_post_kwargs['auth'] = auth
+            try:
+                error_response = requests.post(error_url, **error_post_kwargs)
+                if error_response.status_code == 200:
+                    print("Error reported to server due to post failure")
+                else:
+                    print(f"Failed to report error: {error_response.status_code}")
+            except Exception as ee:
+                print(f"Exception reporting error: {ee}")
         
-        # Cleanup temp files
-        for temp_file in ['temp.mp3', 'temp.wav', 'temp.vtt']:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
+        # Cleanup remaining files
+        cleanup_files([mp3_file, wav_file, vtt_file])
     
     except Exception as e:
         print(f"Exception in loop: {e}")
