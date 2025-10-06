@@ -3,7 +3,7 @@
 # Assume you have FastAPI and uvicorn installed: pip install fastapi uvicorn
 # Change AUDIO_DIR to your actual directory containing MP3 files (recursive).
 # The server does not handle authentication; assume Caddy proxy handles BASIC AUTH.
-# The database is a simple text file 'inprogress.txt' listing file paths in progress.
+# The database is a simple text file 'DB.txt' listing id:path pairs for tasks in progress.
 # Lock uses a simple file-based lock with 4-second timeout.
 # Logs are in ./logs/YYYY-MM-DD.log
 
@@ -19,9 +19,9 @@ import json
 app = FastAPI()
 
 AUDIO_DIR = os.getenv("AUDIO_DIR")  # CHANGE THIS TO YOUR DIRECTORY
-DB_FILE = os.getenv("DB_FILE",'inprogress.txt')
-LOCK_FILE = os.getenv("LOCK_FILE",'lock.file')
-LOG_DIR = os.getenv("LOG_DIR",'./logs')
+DB_FILE = os.getenv("DB_FILE", 'inprogress.txt')
+LOCK_FILE = os.getenv("LOCK_FILE", 'lock.file')
+LOG_DIR = os.getenv("LOG_DIR", './logs')
 
 def log_message(msg: str):
     today = datetime.date.today().isoformat()
@@ -48,7 +48,10 @@ def find_file_to_process(root_dir: str) -> Path | None:
     in_progress = set()
     if Path(DB_FILE).exists():
         with open(DB_FILE, 'r') as f:
-            in_progress = {line.strip() for line in f}
+            for line in f:
+                if ':' in line:
+                    _, path = line.strip().split(':', 1)
+                    in_progress.add(path)
     for file in sorted(Path(root_dir).rglob('*.mp3')):
         path_str = str(file)
         vtt = file.with_suffix('.vtt')
@@ -69,7 +72,7 @@ def get_task(request: Request):
         raise HTTPException(status_code=500, detail="Missing language JSON")
     
     lang_data = json.loads(json_file.read_text())
-    lang = lang_data.get('language')
+    lang = lang_data.get('sql_params').get('language')
     if not lang:
         log_message(f"Missing language key in JSON for {file} from IP: {request.client.host}")
         raise HTTPException(status_code=500, detail="Missing language key")
@@ -80,7 +83,7 @@ def get_task(request: Request):
     fd = acquire_lock(LOCK_FILE)
     try:
         with open(DB_FILE, 'a') as f:
-            f.write(path_str + '\n')
+            f.write(f"{id_}:{path_str}\n")
     finally:
         release_lock(fd, LOCK_FILE)
     
@@ -113,22 +116,21 @@ async def post_result(request: Request):
             raise HTTPException(status_code=404, detail="ID not found")
         
         with open(DB_FILE, 'r') as f:
-            paths = [line.strip() for line in f]
+            lines = f.readlines()
         
         matching_path = None
-        for p in paths:
-            if hashlib.md5(p.encode()).hexdigest() == id_:
-                matching_path = p
+        for line in lines:
+            if line.startswith(id_ + ':'):
+                matching_path = line.strip().split(':', 1)[1]
                 break
         
         if not matching_path:
             raise HTTPException(status_code=404, detail="ID not found")
         
-        # Remove from DB
-        paths.remove(matching_path)
+        # Remove the line
+        new_lines = [l for l in lines if not l.startswith(id_ + ':')]
         with open(DB_FILE, 'w') as f:
-            for p in paths:
-                f.write(p + '\n')
+            f.writelines(new_lines)
     
     finally:
         release_lock(fd, LOCK_FILE)
@@ -137,5 +139,42 @@ async def post_result(request: Request):
     vtt_path.write_text(vtt_content)
     
     log_message(f"Processed file {matching_path} (ID: {id_}), saved VTT to {vtt_path} from IP: {request.client.host}")
+    
+    return {"status": "ok"}
+
+@app.post("/error")
+async def post_error(request: Request):
+    data = await request.json()
+    id_ = data.get('id')
+    if not id_:
+        log_message(f"Invalid POST data for /error from IP: {request.client.host}")
+        raise HTTPException(status_code=400, detail="Missing id")
+    
+    fd = acquire_lock(LOCK_FILE)
+    try:
+        if not Path(DB_FILE).exists():
+            raise HTTPException(status_code=404, detail="ID not found")
+        
+        with open(DB_FILE, 'r') as f:
+            lines = f.readlines()
+        
+        found = False
+        for line in lines:
+            if line.startswith(id_ + ':'):
+                found = True
+                break
+        
+        if not found:
+            raise HTTPException(status_code=404, detail="ID not found")
+        
+        # Remove the line
+        new_lines = [l for l in lines if not l.startswith(id_ + ':')]
+        with open(DB_FILE, 'w') as f:
+            f.writelines(new_lines)
+    
+    finally:
+        release_lock(fd, LOCK_FILE)
+    
+    log_message(f"Error reported for ID: {id_} from IP: {request.client.host}, removed from DB")
     
     return {"status": "ok"}
