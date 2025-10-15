@@ -261,7 +261,23 @@ else:
                 # Run whisper.cpp
                 current_start_time = time.time()
                 whisper_cmd = [
-                    './whisper/whisper.cpp/build/bin/whisper-cli', '-m', './whisper/whisper.cpp/models/ggml-medium.bin', '-f', wav_file, '--language', language, '-ovtt'
+                    './whisper/whisper.cpp/build/bin/whisper-cli',
+                    '-m',
+                    './whisper/whisper.cpp/models/ggml-medium.bin',
+                    '--language',
+                    language,
+                    '--vad',
+                    '--vad-model',
+                    './whisper/whisper.cpp/models/ggml-silero-v5.1.2.bin',
+                    '-bs',
+                    '5',
+                    '--entropy-thold',
+                    '2.8',
+                    '--max-context',
+                    '64',
+                    '-f',
+                    wav_file,
+                    '-ovtt'
                 ]
                 process = subprocess.Popen(whisper_cmd)
                 current_process = process

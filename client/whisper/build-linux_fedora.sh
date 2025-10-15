@@ -5,7 +5,7 @@
 # Default backend is CPU only. Supports Vulkan, NVIDIA (CUDA), and OpenVINO.
 # Uses pyenv for Python 3.10 only if OpenVINO is selected.
 
-set -e  # Exit on error
+#set -e  # Exit on error
 
 # Define model variable
 MODEL="medium"
