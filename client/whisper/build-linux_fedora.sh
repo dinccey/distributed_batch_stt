@@ -66,6 +66,9 @@ if [ ! -d "whisper.cpp" ]; then
 fi
 cd whisper.cpp
 
+# Download VAD model
+bash ./models/download-vad-model.sh silero-v5.1.2
+
 # Step 3: Download GGML model
 echo "Downloading GGML $MODEL model..."
 bash ./models/download-ggml-model.sh $MODEL

@@ -215,3 +215,6 @@ processed.*
 *.log
 *.wav
 *.mp3
+processed_uploaded/
+processed_not_uploaded/
+not_processed_failed_report/
