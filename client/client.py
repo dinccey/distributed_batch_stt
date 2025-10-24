@@ -272,14 +272,14 @@ def process_loop(check_timeout=None):
                 # Run whisper.cpp
                 current_start_time = time.time()
                 whisper_cmd = [
-                    './main',
+                    './whisper/whisper.cpp/build/bin/whisper-cli',
                     '-m',
-                    './models/ggml-medium.bin',
+                    './whisper/whisper.cpp/models/ggml-medium.bin',
                     '--language',
                     language,
                     '--vad',
                     '--vad-model',
-                    './models/ggml-silero-v5.1.2.bin',
+                    './whisper/whisper.cpp/models/ggml-silero-v5.1.2.bin',
                     '-bs',
                     '5',
                     '--entropy-thold',
