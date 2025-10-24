@@ -57,7 +57,7 @@ python3.10 -m venv openvino_conv_env
 source openvino_conv_env/bin/activate
 python3.10 -m pip install --upgrade pip
 python3.10 -m pip install --upgrade setuptools
-python3.10 -m pip install numpy torch openai-whisper
+python3.10 -m pip install numpy torch openai-whisper croniter
 
 
 # Step 7: Check for conflicting whisper.py file

@@ -96,7 +96,7 @@ if [ "$backend" = "openvino" ]; then
     source openvino_conv_env/bin/activate
     python3.10 -m pip install --upgrade pip
     python3.10 -m pip install --upgrade setuptools
-    python3.10 -m pip install numpy torch openai-whisper
+    python3.10 -m pip install numpy torch openai-whisper croniter
     python3.10 -m pip install -r requirements-openvino.txt
 
     # Step 7: Check for conflicting whisper.py file
