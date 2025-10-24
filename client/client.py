@@ -105,16 +105,105 @@ def cleanup_files(files):
         if os.path.exists(f):
             os.remove(f)
 
-def process_tasks(session_start=None):
+def retry_failed():
+    """Retry failed VTT uploads and error reports based on folder contents."""
+    failed_report_dir = 'not_processed_failed_report'
+    not_uploaded_dir = 'processed_not_uploaded'
+    uploaded_dir = 'processed_uploaded'
+
+    # First, retry VTT uploads from processed_not_uploaded
+    if os.path.exists(not_uploaded_dir):
+        for filename in os.listdir(not_uploaded_dir):
+            if filename.endswith('.vtt'):
+                task_id = filename[:-4]  # remove .vtt
+                vtt_path = os.path.join(not_uploaded_dir, filename)
+                with open(vtt_path, 'r') as f:
+                    vtt_content = f.read()
+
+                posted = False
+                for attempt in range(3):
+                    try:
+                        post_data = {'id': task_id, 'vtt': vtt_content}
+                        post_kwargs = {'json': post_data}
+                        if auth:
+                            post_kwargs['auth'] = auth
+                        post_response = requests.post(post_url, **post_kwargs)
+                        if post_response.status_code == 200:
+                            print(f"Successfully retried upload for {task_id}")
+                            posted = True
+                            break
+                        else:
+                            print(f"VTT retry attempt {attempt+1} for {task_id} failed with status {post_response.status_code}")
+                    except Exception as pe:
+                        print(f"VTT retry attempt {attempt+1} for {task_id} exception: {pe}")
+                    time.sleep(5)
+
+                if posted:
+                    # Move to uploaded
+                    os.rename(vtt_path, os.path.join(uploaded_dir, filename))
+                    # Remove corresponding failed report file if exists (since now successful)
+                    failed_report_path = os.path.join(failed_report_dir, task_id)
+                    if os.path.exists(failed_report_path):
+                        os.remove(failed_report_path)
+                else:
+                    print(f"Failed to retry VTT upload for {task_id} after 3 attempts")
+                    # Since VTT post failed again, try to report error
+                    error_post_data = {'id': task_id}
+                    error_post_kwargs = {'json': error_post_data}
+                    if auth:
+                        error_post_kwargs['auth'] = auth
+                    try:
+                        error_response = requests.post(error_url, **error_post_kwargs)
+                        if error_response.status_code == 200:
+                            print(f"Error reported to server for {task_id} after VTT retry failure")
+                        else:
+                            print(f"Failed to report error for {task_id}: {error_response.status_code}")
+                            # Create empty file if not exists
+                            if not os.path.exists(failed_report_path):
+                                with open(failed_report_path, 'w') as _:
+                                    pass
+                    except Exception as ee:
+                        print(f"Exception reporting error for {task_id}: {ee}")
+                        # Create empty file if not exists
+                        if not os.path.exists(failed_report_path):
+                            with open(failed_report_path, 'w') as _:
+                                pass
+
+    # Then, retry remaining error reports from not_processed_failed_report
+    if os.path.exists(failed_report_dir):
+        for filename in os.listdir(failed_report_dir):
+            task_id = filename  # no extension
+            failed_report_path = os.path.join(failed_report_dir, filename)
+            error_post_data = {'id': task_id}
+            error_post_kwargs = {'json': error_post_data}
+            if auth:
+                error_post_kwargs['auth'] = auth
+
+            reported = False
+            for attempt in range(3):
+                try:
+                    error_response = requests.post(error_url, **error_post_kwargs)
+                    if error_response.status_code == 200:
+                        print(f"Successfully retried error report for {task_id}")
+                        reported = True
+                        break
+                    else:
+                        print(f"Error retry attempt {attempt+1} for {task_id} failed with status {error_response.status_code}")
+                except Exception as ee:
+                    print(f"Error retry attempt {attempt+1} for {task_id} exception: {ee}")
+                time.sleep(5)
+
+            if reported:
+                os.remove(failed_report_path)
+            else:
+                print(f"Failed to retry error report for {task_id} after 3 attempts")
+
+def process_loop(check_timeout=None):
+    global current_task_id, current_language, current_audio_minutes, current_time_taken, current_start_time, current_process, current_files
     while True:
-        if interrupted:
+        if check_timeout and check_timeout():
+            print(f"Processing window expired after {PROCESSING_HOURS} hours.")
             break
-        if session_start is not None:
-            now = datetime.now()
-            elapsed_seconds = (now - session_start).total_seconds()
-            if PROCESSING_HOURS > 0 and elapsed_seconds / 3600 > PROCESSING_HOURS:
-                print(f"Processing window expired after {PROCESSING_HOURS} hours. Elapsed: {elapsed_seconds / 3600:.2f}h")
-                break
 
         try:
             kwargs = {'stream': True}
@@ -183,14 +272,14 @@ def process_tasks(session_start=None):
                 # Run whisper.cpp
                 current_start_time = time.time()
                 whisper_cmd = [
-                    './whisper/whisper.cpp/build/bin/whisper-cli',
+                    './main',
                     '-m',
-                    './whisper/whisper.cpp/models/ggml-medium.bin',
+                    './models/ggml-medium.bin',
                     '--language',
                     language,
                     '--vad',
                     '--vad-model',
-                    './whisper/whisper.cpp/models/ggml-silero-v5.1.2.bin',
+                    './models/ggml-silero-v5.1.2.bin',
                     '-bs',
                     '5',
                     '--entropy-thold',
@@ -321,124 +410,34 @@ def process_tasks(session_start=None):
             if interrupted:
                 break
 
-def retry_failed():
-    """Retry failed VTT uploads and error reports based on folder contents."""
-    failed_report_dir = 'not_processed_failed_report'
-    not_uploaded_dir = 'processed_not_uploaded'
-    uploaded_dir = 'processed_uploaded'
-
-    # First, retry VTT uploads from processed_not_uploaded
-    if os.path.exists(not_uploaded_dir):
-        for filename in os.listdir(not_uploaded_dir):
-            if filename.endswith('.vtt'):
-                task_id = filename[:-4]  # remove .vtt
-                vtt_path = os.path.join(not_uploaded_dir, filename)
-                with open(vtt_path, 'r') as f:
-                    vtt_content = f.read()
-
-                posted = False
-                for attempt in range(3):
-                    try:
-                        post_data = {'id': task_id, 'vtt': vtt_content}
-                        post_kwargs = {'json': post_data}
-                        if auth:
-                            post_kwargs['auth'] = auth
-                        post_response = requests.post(post_url, **post_kwargs)
-                        if post_response.status_code == 200:
-                            print(f"Successfully retried upload for {task_id}")
-                            posted = True
-                            break
-                        else:
-                            print(f"VTT retry attempt {attempt+1} for {task_id} failed with status {post_response.status_code}")
-                    except Exception as pe:
-                        print(f"VTT retry attempt {attempt+1} for {task_id} exception: {pe}")
-                    time.sleep(5)
-
-                if posted:
-                    # Move to uploaded
-                    os.rename(vtt_path, os.path.join(uploaded_dir, filename))
-                    # Remove corresponding failed report file if exists (since now successful)
-                    failed_report_path = os.path.join(failed_report_dir, task_id)
-                    if os.path.exists(failed_report_path):
-                        os.remove(failed_report_path)
-                else:
-                    print(f"Failed to retry VTT upload for {task_id} after 3 attempts")
-                    # Since VTT post failed again, try to report error
-                    error_post_data = {'id': task_id}
-                    error_post_kwargs = {'json': error_post_data}
-                    if auth:
-                        error_post_kwargs['auth'] = auth
-                    try:
-                        error_response = requests.post(error_url, **error_post_kwargs)
-                        if error_response.status_code == 200:
-                            print(f"Error reported to server for {task_id} after VTT retry failure")
-                        else:
-                            print(f"Failed to report error for {task_id}: {error_response.status_code}")
-                            # Create empty file if not exists
-                            if not os.path.exists(failed_report_path):
-                                with open(failed_report_path, 'w') as _:
-                                    pass
-                    except Exception as ee:
-                        print(f"Exception reporting error for {task_id}: {ee}")
-                        # Create empty file if not exists
-                        if not os.path.exists(failed_report_path):
-                            with open(failed_report_path, 'w') as _:
-                                pass
-
-    # Then, retry remaining error reports from not_processed_failed_report
-    if os.path.exists(failed_report_dir):
-        for filename in os.listdir(failed_report_dir):
-            task_id = filename  # no extension
-            failed_report_path = os.path.join(failed_report_dir, filename)
-            error_post_data = {'id': task_id}
-            error_post_kwargs = {'json': error_post_data}
-            if auth:
-                error_post_kwargs['auth'] = auth
-
-            reported = False
-            for attempt in range(3):
-                try:
-                    error_response = requests.post(error_url, **error_post_kwargs)
-                    if error_response.status_code == 200:
-                        print(f"Successfully retried error report for {task_id}")
-                        reported = True
-                        break
-                    else:
-                        print(f"Error retry attempt {attempt+1} for {task_id} failed with status {error_response.status_code}")
-                except Exception as ee:
-                    print(f"Error retry retry attempt {attempt+1} for {task_id} exception: {ee}")
-                time.sleep(5)
-
-            if reported:
-                os.remove(failed_report_path)
-            else:
-                print(f"Failed to retry error report for {task_id} after 3 attempts")
-
 if args.retry_failed:
     retry_failed()
 else:
     if not CRON_SCHEDULE:
         # No cron schedule: run continuously
-        process_tasks()
+        process_loop()
     else:
         # Cron schedule provided: use scheduled processing windows
-        cron = croniter.Croniter(CRON_SCHEDULE, ret_type=datetime)
+        cron = croniter.croniter(CRON_SCHEDULE, datetime.now())
         while True:
-            if interrupted:
-                break
-            next_run = cron.get_next(datetime.now())
+            next_run = cron.get_next(datetime)
             now = datetime.now()
             delta = next_run - now
             if delta.total_seconds() > 0:
                 print(f"Next processing at {next_run.strftime('%Y-%m-%d %H:%M:%S')}, sleeping {delta.total_seconds():.0f} seconds")
                 time.sleep(delta.total_seconds())
-                if interrupted:
-                    break
             
             session_start = datetime.now()
             print(f"Starting processing window at {session_start.strftime('%Y-%m-%d %H:%M:%S')}")
             
-            process_tasks(session_start)
+            # Define timeout check
+            def check_timeout():
+                now = datetime.now()
+                elapsed_seconds = (now - session_start).total_seconds()
+                return PROCESSING_HOURS > 0 and elapsed_seconds / 3600 > PROCESSING_HOURS
+            
+            # Now run the processing loop until time's up or interrupted
+            process_loop(check_timeout=check_timeout)
             
             if interrupted:
                 break
