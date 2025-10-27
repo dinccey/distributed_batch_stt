@@ -32,6 +32,7 @@ You can load the environment variables with:
 ```sh
 source client/load_env.sh
 ```
+The client supports cron scheduling. The ENV variable CRON can be set to a cron schedule that denotes a start time. THe variable PROCESSING_HOURS is a value in hours that denotes for how long the client will be transcriing for since starting.
 
 ---
 
@@ -124,6 +125,10 @@ The server is a FastAPI app that distributes audio tasks and collects results. I
 	```
 	- Replace `/mnt/data/video` with the actual path to your MP3 files.
 	- Map `logs` and `inprogress.txt` to host locations to avoid data loss when rebuilding the container.
+	podman example:
+	```sh
+	podman run -d -p 8000:8000 --replace --restart=always --name=whsiper-server -v ./inprogress.txt:/app/inprogress.txt:Z -v ./processed.csv:/app/processed.csv:Z -v /home/shared/video:/mnt/data/video:Z -v ./logs:/app/logs:Z whisper-server
+ 	```
 
 3. **Environment Variables:**
 	- Copy `.env.example` to `.env` and edit as needed:
