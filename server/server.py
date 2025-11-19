@@ -3,8 +3,8 @@
 # Assume you have FastAPI and uvicorn installed: pip install fastapi uvicorn
 # Change AUDIO_DIR to your actual directory containing MP3 files (recursive).
 # The server does not handle authentication; assume Caddy proxy handles BASIC AUTH.
-# The database is a simple text file 'DB.txt' listing id:path pairs for tasks in progress.
-# Lock uses a simple file-based lock with 4-second timeout.
+# The database is a simple text file 'DB.txt' listing id:path:timestamp pairs for tasks in progress.
+# Lock uses a simple file-based lock with 4-second timeout and stale lock detection.
 # Logs are in ./logs/YYYY-MM-DD.log
 
 from fastapi import FastAPI, Request, HTTPException
@@ -16,6 +16,7 @@ import datetime
 from pathlib import Path
 import json
 import csv
+import stat  # For st_mtime
 
 app = FastAPI()
 
@@ -25,6 +26,9 @@ LOCK_FILE = os.getenv("LOCK_FILE", 'lock.file')
 LOG_DIR = os.getenv("LOG_DIR", './logs')
 CSV_FILE = 'processed.csv'
 FAILED_FILE = 'failed.txt'
+
+TASK_TIMEOUT = 360000  # 100 hour for task expiration
+STALE_LOCK_TIMEOUT = 10  # Seconds to consider a lock stale
 
 def log_message(msg: str):
     today = datetime.date.today().isoformat()
@@ -36,6 +40,14 @@ def log_message(msg: str):
 def acquire_lock(lock_file: str, timeout: float = 4.0) -> int:
     start = time.time()
     while time.time() - start < timeout:
+        if os.path.exists(lock_file):
+            try:
+                stat_info = os.stat(lock_file)
+                if time.time() - stat_info.st_mtime > STALE_LOCK_TIMEOUT:
+                    os.remove(lock_file)
+                    log_message(f"Removed stale lock file: {lock_file}")
+            except Exception as e:
+                log_message(f"Error checking/removing stale lock: {str(e)}")
         try:
             fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_RDWR)
             return fd
@@ -64,19 +76,66 @@ def add_to_failed(path: str):
         release_lock(fd, LOCK_FILE)
 
 def find_file_to_process(root_dir: str) -> Path | None:
-    in_progress = set()
+    in_progress = {}
     if Path(DB_FILE).exists():
         with open(DB_FILE, 'r') as f:
             for line in f:
-                if ':' in line:
-                    _, path = line.strip().split(':', 1)
-                    in_progress.add(path)
+                line_strip = line.strip()
+                if not line_strip:
+                    continue
+                parts = line_strip.split(':')
+                if len(parts) >= 2:
+                    id_ = parts[0]
+                    if len(parts) >= 3:
+                        ts_str = parts[-1]
+                        path = ':'.join(parts[1:-1])
+                    else:
+                        # Backward compat for old entries without ts (treat as expired later)
+                        ts_str = "0"
+                        path = ':'.join(parts[1:])
+                    try:
+                        ts = float(ts_str)
+                        in_progress[path] = ts
+                    except ValueError:
+                        log_message(f"Invalid timestamp in DB line: {line_strip}")
     failed = set()
     if Path(FAILED_FILE).exists():
         with open(FAILED_FILE, 'r') as f:
             for line in f:
                 failed.add(line.strip())
-    for file in sorted(Path(root_dir).rglob('*.mp3')):
+    # Clean expired tasks
+    now = time.time()
+    expired_paths = [path for path, ts in in_progress.items() if now - ts > TASK_TIMEOUT]
+    if expired_paths:
+        fd = acquire_lock(LOCK_FILE)
+        try:
+            with open(DB_FILE, 'r') as f:
+                lines = f.readlines()
+            new_lines = []
+            for l in lines:
+                l_strip = l.strip()
+                if not l_strip:
+                    new_lines.append(l)
+                    continue
+                parts = l_strip.split(':')
+                if len(parts) >= 2:
+                    if len(parts) >= 3:
+                        path = ':'.join(parts[1:-1])
+                    else:
+                        path = ':'.join(parts[1:])
+                    if path not in expired_paths:
+                        new_lines.append(l)
+            with open(DB_FILE, 'w') as f:
+                f.writelines(new_lines)
+            for path in expired_paths:
+                add_to_failed(path)
+                log_message(f"Expired stale task and added to failed: {path}")
+        finally:
+            release_lock(fd, LOCK_FILE)
+    # Update in_progress after cleanup
+    in_progress = {p: t for p, t in in_progress.items() if p not in expired_paths}
+    # Now scan for available file (generator, no sorted for efficiency)
+    for file in Path(root_dir).rglob('*.mp3'):
         path_str = str(file)
         vtt = file.with_suffix('.vtt')
         if not vtt.exists() and path_str not in in_progress and path_str not in failed:
@@ -118,7 +177,7 @@ def get_task(request: Request):
         fd = acquire_lock(LOCK_FILE)
         try:
             with open(DB_FILE, 'a') as f:
-                f.write(f"{id_}:{path_str}\n")
+                f.write(f"{id_}:{path_str}:{time.time()}\n")
         finally:
             release_lock(fd, LOCK_FILE)
         
@@ -159,15 +218,22 @@ async def post_result(request: Request):
         
         matching_path = None
         for line in lines:
-            if line.startswith(id_ + ':'):
-                matching_path = line.strip().split(':', 1)[1]
+            line_strip = line.strip()
+            if not line_strip:
+                continue
+            parts = line_strip.split(':')
+            if len(parts) >= 2 and parts[0] == id_:
+                if len(parts) >= 3:
+                    matching_path = ':'.join(parts[1:-1])
+                else:
+                    matching_path = ':'.join(parts[1:])
                 break
         
         if not matching_path:
             raise HTTPException(status_code=404, detail="ID not found")
         
         # Remove the line
-        new_lines = [l for l in lines if not l.startswith(id_ + ':')]
+        new_lines = [l for l in lines if not (l.strip() and l.strip().split(':')[0] == id_)]
         with open(DB_FILE, 'w') as f:
             f.writelines(new_lines)
     
@@ -201,18 +267,23 @@ async def post_error(request: Request):
             lines = f.readlines()
         
         matching_path = None
-        found = False
         for line in lines:
-            if line.startswith(id_ + ':'):
-                matching_path = line.strip().split(':', 1)[1]
-                found = True
+            line_strip = line.strip()
+            if not line_strip:
+                continue
+            parts = line_strip.split(':')
+            if len(parts) >= 2 and parts[0] == id_:
+                if len(parts) >= 3:
+                    matching_path = ':'.join(parts[1:-1])
+                else:
+                    matching_path = ':'.join(parts[1:])
                 break
         
-        if not found:
+        if not matching_path:
             raise HTTPException(status_code=404, detail="ID not found")
         
         # Remove the line
-        new_lines = [l for l in lines if not l.startswith(id_ + ':')]
+        new_lines = [l for l in lines if not (l.strip() and l.strip().split(':')[0] == id_)]
         with open(DB_FILE, 'w') as f:
             f.writelines(new_lines)
     
