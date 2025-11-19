@@ -16,7 +16,7 @@ COPY server.py /app/server.py
 # If you have other files, copy them here
 
 # Install dependencies
-RUN pip install --no-cache-dir fastapi uvicorn
+RUN pip install -r requirements.txt
 
 # Expose the port the app runs on
 EXPOSE 8000

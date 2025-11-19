@@ -3,9 +3,9 @@
 # Assume you have FastAPI and uvicorn installed: pip install fastapi uvicorn
 # Change AUDIO_DIR to your actual directory containing MP3 files (recursive).
 # The server does not handle authentication; assume Caddy proxy handles BASIC AUTH.
-# The database is a simple text file 'DB.txt' listing id:path:timestamp pairs for tasks in progress.
-# Lock uses a simple file-based lock with 4-second timeout and stale lock detection.
+# The database is now SQLite 'tasks.db' for managing task states.
 # Logs are in ./logs/YYYY-MM-DD.log
+# No more file-based lock; rely on SQLite for concurrency.
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, Response
@@ -16,19 +16,18 @@ import datetime
 from pathlib import Path
 import json
 import csv
-import stat  # For st_mtime
+import sqlite3
+import threading
 
 app = FastAPI()
 
 AUDIO_DIR = os.getenv("AUDIO_DIR", '/mnt/data/video')  # CHANGE THIS TO YOUR DIRECTORY
-DB_FILE = os.getenv("DB_FILE", 'inprogress.txt')
-LOCK_FILE = os.getenv("LOCK_FILE", 'lock.file')
+DB_FILE = os.getenv("DB_FILE", 'tasks.db')
 LOG_DIR = os.getenv("LOG_DIR", './logs')
 CSV_FILE = 'processed.csv'
-FAILED_FILE = 'failed.txt'
 
-TASK_TIMEOUT = 360000  # 100 hour for task expiration
-STALE_LOCK_TIMEOUT = 10  # Seconds to consider a lock stale
+TASK_TIMEOUT = 360000  # 100 hour for task expiration; adjust as needed
+SYNC_INTERVAL = 300  # 5 minutes for directory sync
 
 def log_message(msg: str):
     today = datetime.date.today().isoformat()
@@ -37,27 +36,117 @@ def log_message(msg: str):
     with open(log_file, 'a') as f:
         f.write(f"{datetime.datetime.now().isoformat()} - {msg}\n")
 
-def acquire_lock(lock_file: str, timeout: float = 4.0) -> int:
-    start = time.time()
-    while time.time() - start < timeout:
-        if os.path.exists(lock_file):
-            try:
-                stat_info = os.stat(lock_file)
-                if time.time() - stat_info.st_mtime > STALE_LOCK_TIMEOUT:
-                    os.remove(lock_file)
-                    log_message(f"Removed stale lock file: {lock_file}")
-            except Exception as e:
-                log_message(f"Error checking/removing stale lock: {str(e)}")
-        try:
-            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            return fd
-        except FileExistsError:
-            time.sleep(0.1)
-    raise TimeoutError("Failed to acquire lock within timeout")
+def get_db_connection():
+    conn = sqlite3.connect(DB_FILE, timeout=10.0, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")  # Better concurrency
+    return conn
 
-def release_lock(fd: int, lock_file: str):
-    os.close(fd)
-    os.remove(lock_file)
+def init_db():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS tasks (
+            path TEXT PRIMARY KEY,
+            status TEXT DEFAULT 'pending',
+            assigned_at REAL,
+            assigned_ip TEXT,
+            task_id TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def clean_expired():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    now = time.time()
+    cur.execute("""
+        UPDATE tasks
+        SET status = 'failed', assigned_at = NULL, assigned_ip = NULL, task_id = NULL
+        WHERE status = 'in_progress' AND ? - assigned_at > ?
+    """, (now, TASK_TIMEOUT))
+    if cur.rowcount > 0:
+        log_message(f"Expired {cur.rowcount} stale tasks")
+    conn.commit()
+    conn.close()
+
+def set_task_failed(path: str, error: str = 'Unknown error'):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE tasks
+        SET status = 'failed', assigned_at = NULL, assigned_ip = NULL, task_id = NULL
+        WHERE path = ?
+    """, (path,))
+    conn.commit()
+    conn.close()
+
+def sync_dir_with_db():
+    log_message("Starting directory sync")
+    conn = get_db_connection()
+    cur = conn.cursor()
+    added = 0
+    reset = 0
+    for dirpath, dirnames, filenames in os.walk(AUDIO_DIR):
+        for filename in filenames:
+            if filename.lower().endswith('.mp3'):
+                path_str = os.path.join(dirpath, filename)
+                vtt_path = os.path.splitext(path_str)[0] + '.vtt'
+                if not os.path.exists(vtt_path):
+                    cur.execute("SELECT status, assigned_at FROM tasks WHERE path = ?", (path_str,))
+                    row = cur.fetchone()
+                    do_reset = False
+                    if row is None:
+                        cur.execute("INSERT INTO tasks (path, status) VALUES (?, 'pending')", (path_str,))
+                        added += 1
+                    else:
+                        current_status = row[0]
+                        if current_status == 'pending':
+                            continue
+                        if current_status == 'in_progress':
+                            if time.time() - row[1] > TASK_TIMEOUT:
+                                do_reset = True
+                                log_message(f"Expiring in_progress task during sync: {path_str}")
+                            else:
+                                continue
+                        else:  # failed or completed, but vtt missing, reset
+                            do_reset = True
+                        if do_reset:
+                            cur.execute("""
+                                UPDATE tasks
+                                SET status = 'pending', assigned_at = NULL, assigned_ip = NULL, task_id = NULL
+                                WHERE path = ?
+                            """, (path_str,))
+                            reset += 1
+                            log_message(f"Reset task to pending: {path_str}")
+    conn.commit()
+    conn.close()
+    log_message(f"Directory sync completed: {added} added, {reset} reset")
+
+def periodic_sync():
+    while True:
+        sync_dir_with_db()
+        time.sleep(SYNC_INTERVAL)
+
+def find_file_to_process(ip: str) -> Path | None:
+    clean_expired()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT path FROM tasks WHERE status = 'pending' LIMIT 1")
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return None
+    path_str = row[0]
+    id_ = hashlib.md5(path_str.encode()).hexdigest()
+    cur.execute("""
+        UPDATE tasks
+        SET status = 'in_progress', assigned_at = ?, assigned_ip = ?, task_id = ?
+        WHERE path = ? AND status = 'pending'
+    """, (time.time(), ip, id_, path_str))
+    conn.commit()
+    conn.close()
+    return Path(path_str)
 
 def log_to_csv(filepath: str, fileid: str, ip: str, error: str):
     now = datetime.datetime.now().isoformat()
@@ -67,89 +156,24 @@ def log_to_csv(filepath: str, fileid: str, ip: str, error: str):
             writer.writerow(['filepath', 'fileid', 'ip', 'datetime', 'error'])
         writer.writerow([filepath, fileid, ip, now, error])
 
-def add_to_failed(path: str):
-    fd = acquire_lock(LOCK_FILE)
-    try:
-        with open(FAILED_FILE, 'a') as f:
-            f.write(f"{path}\n")
-    finally:
-        release_lock(fd, LOCK_FILE)
-
-def find_file_to_process(root_dir: str) -> Path | None:
-    in_progress = {}
-    if Path(DB_FILE).exists():
-        with open(DB_FILE, 'r') as f:
-            for line in f:
-                line_strip = line.strip()
-                if not line_strip:
-                    continue
-                parts = line_strip.split(':')
-                if len(parts) >= 2:
-                    id_ = parts[0]
-                    if len(parts) >= 3:
-                        ts_str = parts[-1]
-                        path = ':'.join(parts[1:-1])
-                    else:
-                        # Backward compat for old entries without ts (treat as expired later)
-                        ts_str = "0"
-                        path = ':'.join(parts[1:])
-                    try:
-                        ts = float(ts_str)
-                        in_progress[path] = ts
-                    except ValueError:
-                        log_message(f"Invalid timestamp in DB line: {line_strip}")
-    failed = set()
-    if Path(FAILED_FILE).exists():
-        with open(FAILED_FILE, 'r') as f:
-            for line in f:
-                failed.add(line.strip())
-    # Clean expired tasks
-    now = time.time()
-    expired_paths = [path for path, ts in in_progress.items() if now - ts > TASK_TIMEOUT]
-    if expired_paths:
-        fd = acquire_lock(LOCK_FILE)
-        try:
-            with open(DB_FILE, 'r') as f:
-                lines = f.readlines()
-            new_lines = []
-            for l in lines:
-                l_strip = l.strip()
-                if not l_strip:
-                    new_lines.append(l)
-                    continue
-                parts = l_strip.split(':')
-                if len(parts) >= 2:
-                    if len(parts) >= 3:
-                        path = ':'.join(parts[1:-1])
-                    else:
-                        path = ':'.join(parts[1:])
-                    if path not in expired_paths:
-                        new_lines.append(l)
-            with open(DB_FILE, 'w') as f:
-                f.writelines(new_lines)
-            for path in expired_paths:
-                add_to_failed(path)
-                log_message(f"Expired stale task and added to failed: {path}")
-        finally:
-            release_lock(fd, LOCK_FILE)
-    # Update in_progress after cleanup
-    in_progress = {p: t for p, t in in_progress.items() if p not in expired_paths}
-    # Now scan for available file (generator, no sorted for efficiency)
-    for file in Path(root_dir).rglob('*.mp3'):
-        path_str = str(file)
-        vtt = file.with_suffix('.vtt')
-        if not vtt.exists() and path_str not in in_progress and path_str not in failed:
-            return file
-    return None
+@app.on_event("startup")
+def startup_event():
+    init_db()
+    # Initial sync (blocking, but ok for startup)
+    sync_dir_with_db()
+    # Start periodic sync in background
+    thread = threading.Thread(target=periodic_sync, daemon=True)
+    thread.start()
 
 @app.get("/task")
 def get_task(request: Request):
+    ip = request.client.host
     attempts = 0
-    max_attempts = 3  # Safety limit to prevent infinite loop
+    max_attempts = 10  # Increased slightly for safety
     while attempts < max_attempts:
-        file = find_file_to_process(AUDIO_DIR)
+        file = find_file_to_process(ip)
         if file is None:
-            log_message(f"No available file for IP: {request.client.host}")
+            log_message(f"No available file for IP: {ip}")
             return Response(status_code=204)
         
         path_str = str(file)
@@ -167,21 +191,14 @@ def get_task(request: Request):
         
         except Exception as e:
             error_str = str(e)
-            log_message(f"Error with JSON for {file}: {error_str} from IP: {request.client.host}")
-            log_to_csv(path_str, id_, request.client.host, error_str)
-            add_to_failed(path_str)
+            log_message(f"Error with JSON for {file}: {error_str} from IP: {ip}")
+            log_to_csv(path_str, id_, ip, error_str)
+            set_task_failed(path_str, error_str)
             attempts += 1
             continue
         
         # If we reach here, the file is good
-        fd = acquire_lock(LOCK_FILE)
-        try:
-            with open(DB_FILE, 'a') as f:
-                f.write(f"{id_}:{path_str}:{time.time()}\n")
-        finally:
-            release_lock(fd, LOCK_FILE)
-        
-        log_message(f"Assigned file {path_str} (ID: {id_}, Lang: {lang}) to IP: {request.client.host}")
+        log_message(f"Assigned file {path_str} (ID: {id_}, Lang: {lang}) to IP: {ip}")
         
         headers = {
             'X-Task-ID': id_,
@@ -196,7 +213,7 @@ def get_task(request: Request):
         return StreamingResponse(iterfile(), media_type="audio/mpeg", headers=headers)
     
     # If max attempts reached, return no content
-    log_message(f"Max attempts reached for IP: {request.client.host}")
+    log_message(f"Max attempts reached for IP: {ip}")
     return Response(status_code=204)
 
 @app.post("/result")
@@ -208,44 +225,30 @@ async def post_result(request: Request):
         log_message(f"Invalid POST data from IP: {request.client.host}")
         raise HTTPException(status_code=400, detail="Missing id or vtt")
     
-    fd = acquire_lock(LOCK_FILE)
-    try:
-        if not Path(DB_FILE).exists():
-            raise HTTPException(status_code=404, detail="ID not found")
-        
-        with open(DB_FILE, 'r') as f:
-            lines = f.readlines()
-        
-        matching_path = None
-        for line in lines:
-            line_strip = line.strip()
-            if not line_strip:
-                continue
-            parts = line_strip.split(':')
-            if len(parts) >= 2 and parts[0] == id_:
-                if len(parts) >= 3:
-                    matching_path = ':'.join(parts[1:-1])
-                else:
-                    matching_path = ':'.join(parts[1:])
-                break
-        
-        if not matching_path:
-            raise HTTPException(status_code=404, detail="ID not found")
-        
-        # Remove the line
-        new_lines = [l for l in lines if not (l.strip() and l.strip().split(':')[0] == id_)]
-        with open(DB_FILE, 'w') as f:
-            f.writelines(new_lines)
+    ip = request.client.host
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT path FROM tasks WHERE task_id = ? AND status = 'in_progress'", (id_,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="ID not found")
     
-    finally:
-        release_lock(fd, LOCK_FILE)
+    matching_path = row[0]
+    cur.execute("""
+        UPDATE tasks
+        SET status = 'completed', assigned_at = NULL, assigned_ip = NULL, task_id = NULL
+        WHERE path = ?
+    """, (matching_path,))
+    conn.commit()
+    conn.close()
     
     vtt_path = Path(matching_path).with_suffix('.vtt')
     vtt_path.write_text(vtt_content)
     
-    log_to_csv(matching_path, id_, request.client.host, "")
+    log_to_csv(matching_path, id_, ip, "")
     
-    log_message(f"Processed file {matching_path} (ID: {id_}), saved VTT to {vtt_path} from IP: {request.client.host}")
+    log_message(f"Processed file {matching_path} (ID: {id_}), saved VTT to {vtt_path} from IP: {ip}")
     
     return {"status": "ok"}
 
@@ -258,40 +261,26 @@ async def post_error(request: Request):
         log_message(f"Invalid POST data for /error from IP: {request.client.host}")
         raise HTTPException(status_code=400, detail="Missing id")
     
-    fd = acquire_lock(LOCK_FILE)
-    try:
-        if not Path(DB_FILE).exists():
-            raise HTTPException(status_code=404, detail="ID not found")
-        
-        with open(DB_FILE, 'r') as f:
-            lines = f.readlines()
-        
-        matching_path = None
-        for line in lines:
-            line_strip = line.strip()
-            if not line_strip:
-                continue
-            parts = line_strip.split(':')
-            if len(parts) >= 2 and parts[0] == id_:
-                if len(parts) >= 3:
-                    matching_path = ':'.join(parts[1:-1])
-                else:
-                    matching_path = ':'.join(parts[1:])
-                break
-        
-        if not matching_path:
-            raise HTTPException(status_code=404, detail="ID not found")
-        
-        # Remove the line
-        new_lines = [l for l in lines if not (l.strip() and l.strip().split(':')[0] == id_)]
-        with open(DB_FILE, 'w') as f:
-            f.writelines(new_lines)
+    ip = request.client.host
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT path FROM tasks WHERE task_id = ? AND status = 'in_progress'", (id_,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="ID not found")
     
-    finally:
-        release_lock(fd, LOCK_FILE)
+    matching_path = row[0]
+    cur.execute("""
+        UPDATE tasks
+        SET status = 'failed', assigned_at = NULL, assigned_ip = NULL, task_id = NULL
+        WHERE path = ?
+    """, (matching_path,))
+    conn.commit()
+    conn.close()
     
-    log_to_csv(matching_path, id_, request.client.host, error_msg)
+    log_to_csv(matching_path, id_, ip, error_msg)
     
-    log_message(f"Error reported for {matching_path} (ID: {id_}): {error_msg} from IP: {request.client.host}, removed from DB.")
+    log_message(f"Error reported for {matching_path} (ID: {id_}): {error_msg} from IP: {ip}, set to failed.")
     
     return {"status": "ok"}
