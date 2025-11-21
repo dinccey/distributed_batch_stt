@@ -1,6 +1,5 @@
 # client.py
-# Edited: VAD configurable, Gotify error logging with console error or last 20 lines of subprocess output.
-# - Notifications prefer the exact error message printed to console; otherwise include stderr tail from failing subprocess.
+# Edited: stream whisper stdout live to CLI, still capture stderr/stdout tails for notifications.
 
 import requests
 import subprocess
@@ -12,7 +11,9 @@ import signal
 import sys
 import argparse
 from datetime import datetime
+import threading
 import croniter
+from collections import deque
 
 # -----------------------------
 # Configuration (from env vars)
@@ -73,21 +74,81 @@ def send_gotify_error(title: str, message: str) -> None:
         except Exception as e:
             print(f"Exception sending Gotify error: {e}")
 
-def tail_text(text: str, n: int = 20) -> str:
-    """Return the last n lines of text."""
-    if not text:
+def tail_text_from_deque(dq: deque, n: int = 20) -> str:
+    """Return last n lines from a deque as a single string."""
+    if not dq:
         return ""
-    lines = text.splitlines()
-    return "\n".join(lines[-n:])
+    return "\n".join(list(dq)[-n:])
 
-def compose_error_message(console_msg: str, stderr_text: str) -> str:
+def compose_error_message(console_msg: str, stdout_deque: deque, stderr_deque: deque) -> str:
     """
-    Prefer the exact console error message; if available, append a tail of stderr.
+    Prefer the exact console error message; append tails of stdout/stderr if available.
     """
-    tail = tail_text(stderr_text, 20)
-    if tail:
-        return f"{console_msg}\n--- stderr tail ---\n{tail}"
-    return console_msg
+    out_tail = tail_text_from_deque(stdout_deque, 20)
+    err_tail = tail_text_from_deque(stderr_deque, 20)
+    parts = [console_msg]
+    if out_tail:
+        parts.append("--- stdout tail ---\n" + out_tail)
+    if err_tail:
+        parts.append("--- stderr tail ---\n" + err_tail)
+    return "\n".join(parts)
+
+def print_subprocess_output(label: str, stdout_deque: deque, stderr_deque: deque) -> None:
+    """Print last 20 lines of captured subprocess output to the CLI."""
+    out_tail = tail_text_from_deque(stdout_deque, 20)
+    err_tail = tail_text_from_deque(stderr_deque, 20)
+    print(f"[{label}] Output tails:")
+    if out_tail:
+        print("  stdout:")
+        for line in out_tail.splitlines():
+            print("    " + line)
+    else:
+        print("  stdout: <empty>")
+    if err_tail:
+        print("  stderr:")
+        for line in err_tail.splitlines():
+            print("    " + line)
+    else:
+        print("  stderr: <empty>")
+
+def stream_subprocess(proc, stdout_deque: deque, stderr_deque: deque, print_stdout_live: bool = False):
+    """
+    Read stdout and stderr from proc line-by-line in threads.
+    If print_stdout_live is True, stdout lines are printed to console as received.
+    Both stdout and stderr lines appended to respective deques (bounded).
+    """
+    def _reader(pipe, dq, print_live):
+        try:
+            for line in iter(pipe.readline, ""):
+                if not line:
+                    break
+                clean = line.rstrip("\n")
+                dq.append(clean)
+                if print_live:
+                    print(clean)
+        except Exception:
+            pass
+        finally:
+            try:
+                pipe.close()
+            except Exception:
+                pass
+
+    threads = []
+    if proc.stdout:
+        t_out = threading.Thread(target=_reader, args=(proc.stdout, stdout_deque, print_stdout_live), daemon=True)
+        t_out.start()
+        threads.append(t_out)
+    if proc.stderr:
+        t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_deque, False), daemon=True)
+        t_err.start()
+        threads.append(t_err)
+
+    # Wait for process to finish and for threads to consume pipes
+    rc = proc.wait()
+    for t in threads:
+        t.join(timeout=1)
+    return rc
 
 # Ensure directories exist
 os.makedirs("processed_uploaded", exist_ok=True)
@@ -163,7 +224,7 @@ def retry_failed():
             if not filename.endswith(".vtt"):
                 continue
 
-            task_id = filename[:-4]  # remove .vtt
+            task_id = filename[:-4]
             vtt_path = os.path.join(not_uploaded_dir, filename)
 
             try:
@@ -194,12 +255,10 @@ def retry_failed():
                 time.sleep(5)
 
             if posted:
-                # Move to uploaded
                 try:
                     os.rename(vtt_path, os.path.join(uploaded_dir, filename))
                 except Exception as e:
                     print(f"Failed to move VTT to uploaded for {task_id}: {e}")
-                # Remove corresponding failed report file if exists
                 failed_report_path = os.path.join(failed_report_dir, task_id)
                 if os.path.exists(failed_report_path):
                     try:
@@ -210,7 +269,6 @@ def retry_failed():
                 msg = f"Failed to retry VTT upload for {task_id} after 3 attempts"
                 print(msg)
                 send_gotify_error(NODE_NAME, msg)
-                # Since VTT post failed again, try to report error
                 error_post_data = {"id": task_id}
                 error_post_kwargs = {"json": error_post_data, "timeout": 10}
                 if auth:
@@ -235,7 +293,7 @@ def retry_failed():
     # Then, retry remaining error reports from not_processed_failed_report
     if os.path.exists(failed_report_dir):
         for filename in os.listdir(failed_report_dir):
-            task_id = filename  # no extension
+            task_id = filename
             failed_report_path = os.path.join(failed_report_dir, filename)
             error_post_data = {"id": task_id}
             error_post_kwargs = {"json": error_post_data, "timeout": 10}
@@ -278,7 +336,6 @@ def process_loop(check_timeout=None):
             break
 
         try:
-            # Fetch task
             kwargs = {"stream": True, "timeout": 30}
             if auth:
                 kwargs["auth"] = auth
@@ -313,7 +370,6 @@ def process_loop(check_timeout=None):
             wav_file = f"{task_id}.wav"
             vtt_file = f"{wav_file}.vtt"
 
-            # Reset state for this task
             current_files = [mp3_file, wav_file, vtt_file]
             current_task_id = task_id
             current_language = language
@@ -321,15 +377,17 @@ def process_loop(check_timeout=None):
             current_time_taken = 0.0
             current_start_time = None
 
-            # Buffers for subprocess stderr tails
-            ffmpeg_stderr = ""
-            whisper_stderr = ""
+            # Buffers for subprocess outputs: bounded deques to hold latest lines
+            ffmpeg_stdout_deque = deque(maxlen=200)
+            ffmpeg_stderr_deque = deque(maxlen=200)
+            whisper_stdout_deque = deque(maxlen=1000)
+            whisper_stderr_deque = deque(maxlen=1000)
 
             try:
                 # Save MP3
                 with open(mp3_file, "wb") as f:
                     for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:  # filter out keep-alive chunks
+                        if chunk:
                             f.write(chunk)
 
                 # Get audio duration using ffprobe
@@ -350,15 +408,31 @@ def process_loop(check_timeout=None):
                 audio_seconds = float(duration_output.strip())
                 current_audio_minutes = audio_seconds / 60.0
 
-                # Convert MP3 to WAV (capture stderr)
+                # Convert MP3 to WAV (capture output)
                 ffmpeg_cmd = ["ffmpeg", "-y", "-i", mp3_file, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_file]
-                process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                current_process = process
-                out, err = process.communicate()
-                current_process = None
-                ffmpeg_stderr = err or ""
-                if process.returncode != 0:
-                    raise subprocess.CalledProcessError(process.returncode, ffmpeg_cmd, output=out, stderr=err)
+                proc = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                # read ffmpeg output fully (no live streaming) but keep tails
+                def _read_all(pipe, dq):
+                    try:
+                        for line in iter(pipe.readline, ""):
+                            if not line:
+                                break
+                            dq.append(line.rstrip("\n"))
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            pipe.close()
+                        except Exception:
+                            pass
+                t1 = threading.Thread(target=_read_all, args=(proc.stdout, ffmpeg_stdout_deque), daemon=True)
+                t2 = threading.Thread(target=_read_all, args=(proc.stderr, ffmpeg_stderr_deque), daemon=True)
+                t1.start(); t2.start()
+                rc = proc.wait()
+                t1.join(timeout=1); t2.join(timeout=1)
+                print_subprocess_output("ffmpeg", ffmpeg_stdout_deque, ffmpeg_stderr_deque)
+                if rc != 0:
+                    raise subprocess.CalledProcessError(rc, ffmpeg_cmd)
 
                 # Build whisper command
                 whisper_cmd = [
@@ -377,22 +451,22 @@ def process_loop(check_timeout=None):
                     wav_file,
                     "-ovtt",
                 ]
-
-                # Enable VAD only if configured and model exists
                 if VAD_ENABLED:
                     if not os.path.exists(VAD_MODEL):
                         raise FileNotFoundError(f"VAD model not found at {VAD_MODEL}")
                     whisper_cmd.extend(["--vad", "--vad-model", VAD_MODEL])
 
-                # Run whisper.cpp (capture stderr)
+                # Run whisper and stream stdout live to console while capturing tails
                 current_start_time = time.time()
-                process = subprocess.Popen(whisper_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                current_process = process
-                out, err = process.communicate()
+                proc = subprocess.Popen(whisper_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                current_process = proc
+                # stream_subprocess reads stdout and stderr concurrently, printing stdout live
+                rc = stream_subprocess(proc, whisper_stdout_deque, whisper_stderr_deque, print_stdout_live=True)
                 current_process = None
-                whisper_stderr = err or ""
-                if process.returncode != 0:
-                    raise subprocess.CalledProcessError(process.returncode, whisper_cmd, output=out, stderr=err)
+                if rc != 0:
+                    # print captured tails for debugging
+                    print_subprocess_output("whisper (on failure)", whisper_stdout_deque, whisper_stderr_deque)
+                    raise subprocess.CalledProcessError(rc, whisper_cmd)
 
                 end_time = time.time()
                 current_time_taken = end_time - current_start_time
@@ -406,13 +480,12 @@ def process_loop(check_timeout=None):
             except Exception as e:
                 console_msg = f"Processing failed: {e}"
                 print(console_msg)
-                # Prefer console_msg, append stderr tail if present
-                extra_tail = whisper_stderr or ffmpeg_stderr
-                notif_msg = compose_error_message(console_msg, extra_tail)
+                # Compose notification with captured tails (whisper preferred)
+                notif_msg = compose_error_message(console_msg, whisper_stdout_deque or ffmpeg_stdout_deque, whisper_stderr_deque or ffmpeg_stderr_deque)
                 log_to_csv(task_id, language, current_time_taken, current_audio_minutes, "failure", str(e))
                 send_gotify_error(NODE_NAME, notif_msg)
 
-                # Send to /error
+                # Report error to server
                 error_post_data = {"id": task_id}
                 error_post_kwargs = {"json": error_post_data, "timeout": 10}
                 if auth:
@@ -423,7 +496,6 @@ def process_loop(check_timeout=None):
                         print("Error reported to server")
                     else:
                         print(f"Failed to report error: {error_response.status_code}")
-                        # Create empty file if not exists
                         failed_report_path = os.path.join("not_processed_failed_report", task_id)
                         if not os.path.exists(failed_report_path):
                             with open(failed_report_path, "w") as _:
@@ -435,20 +507,19 @@ def process_loop(check_timeout=None):
                         with open(failed_report_path, "w") as _:
                             pass
 
-                # Cleanup
+                # Cleanup and reset state
                 cleanup_files(current_files)
                 time.sleep(10)
                 if interrupted:
                     break
 
-                # Reset state after failure
                 current_task_id = None
                 current_language = None
                 current_audio_minutes = 0.0
                 current_time_taken = 0.0
                 current_start_time = None
                 current_files = []
-                continue  # proceed to fetch next task
+                continue
 
             # Post result with retries
             posted = False
@@ -471,7 +542,6 @@ def process_loop(check_timeout=None):
 
             if posted:
                 log_to_csv(task_id, language, time_taken, current_audio_minutes, "success", "")
-                # Move the successfully uploaded VTT to processed_uploaded
                 if os.path.exists(vtt_file):
                     try:
                         os.rename(vtt_file, os.path.join("processed_uploaded", f"{task_id}.vtt"))
@@ -481,15 +551,12 @@ def process_loop(check_timeout=None):
                 msg = f"Failed to post result for {task_id} after 3 attempts"
                 print(msg)
                 log_to_csv(task_id, language, time_taken, current_audio_minutes, "failure", "Failed to post result after 3 attempts")
-                # Prefer console message, no subprocess stderr here
                 send_gotify_error(NODE_NAME, msg)
-                # Move the VTT to processed_not_uploaded to avoid losing work
                 if os.path.exists(vtt_file):
                     try:
                         os.rename(vtt_file, os.path.join("processed_not_uploaded", f"{task_id}.vtt"))
                     except Exception as e:
                         print(f"Failed to move VTT to processed_not_uploaded for {task_id}: {e}")
-                # Send to /error
                 error_post_data = {"id": task_id}
                 error_post_kwargs = {"json": error_post_data, "timeout": 10}
                 if auth:
@@ -511,16 +578,14 @@ def process_loop(check_timeout=None):
                         with open(failed_report_path, "w") as _:
                             pass
 
-            # Cleanup remaining files (MP3 and WAV; VTT was moved)
+            # Cleanup remaining files
             cleanup_files([mp3_file, wav_file])
-            # If VTT was not moved (unexpected), clean it up
             if os.path.exists(vtt_file):
                 try:
                     os.remove(vtt_file)
                 except Exception as e:
                     print(f"Failed to remove leftover VTT {vtt_file}: {e}")
 
-            # Reset state after success/failure
             current_task_id = None
             current_language = None
             current_audio_minutes = 0.0
@@ -534,7 +599,6 @@ def process_loop(check_timeout=None):
         except Exception as e:
             console_msg = f"Exception in loop: {e}"
             print(console_msg)
-            # No subprocess stderr here—send console message only
             send_gotify_error(NODE_NAME, console_msg)
             time.sleep(10)
             if interrupted:
@@ -551,10 +615,8 @@ if args.retry_failed:
     retry_failed()
 else:
     if not CRON_SCHEDULE:
-        # No cron schedule: run continuously
         process_loop()
     else:
-        # Cron schedule provided: use scheduled processing windows
         cron = croniter.croniter(CRON_SCHEDULE, datetime.now())
         while True:
             next_run = cron.get_next(datetime)
@@ -567,13 +629,11 @@ else:
             session_start = datetime.now()
             print(f"Starting processing window at {session_start.strftime('%Y-%m-%d %H:%M:%S')}")
 
-            # Define timeout check
             def check_timeout():
                 now_local = datetime.now()
                 elapsed_seconds = (now_local - session_start).total_seconds()
                 return PROCESSING_HOURS > 0 and elapsed_seconds / 3600.0 > PROCESSING_HOURS
 
-            # Run the processing loop until time's up or interrupted
             process_loop(check_timeout=check_timeout)
 
             if interrupted:
