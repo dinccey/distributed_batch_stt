@@ -21,7 +21,9 @@ echo "Installing/updating common system dependencies..."
 sudo dnf update -y
 sudo dnf install -y git cmake gcc gcc-c++ make python3 python3-pip python3-devel wget tar \
     zlib-devel bzip2 bzip2-devel readline-devel sqlite sqlite-devel openssl-devel tk-devel \
-    libffi-devel xz-devel curl openblas-devel
+    libffi-devel xz-devel curl openblas-devel ffmpeg
+    
+pip install croniter requests
 
 # Backend-specific
 case $backend in
@@ -34,7 +36,7 @@ case $backend in
         sudo dnf install -y vulkan-loader vulkan-loader-devel vulkan-headers vulkan-tools \
             mesa-vulkan-drivers glslc vulkan-validation-layers vulkan-validation-layers-devel \
             libshaderc-devel
-        build_flags="-DGGML_VULKAN=1 -DGGML_BLAS=OFF"
+        build_flags="-DGGML_VULKAN=1"
         ;;
     cuda)
         echo "Building for CUDA (NVIDIA) backend"
