@@ -1,5 +1,6 @@
 # client.py
-# Edited: remove VAD model output, add Gotify error logging, fix try/except flow and robustness
+# Edited: VAD configurable, Gotify error logging with console error or last 20 lines of subprocess output.
+# - Notifications prefer the exact error message printed to console; otherwise include stderr tail from failing subprocess.
 
 import requests
 import subprocess
@@ -25,6 +26,10 @@ try:
     PROCESSING_HOURS = float(os.getenv("PROCESSING_HOURS", "1"))
 except ValueError:
     PROCESSING_HOURS = 1.0
+
+# VAD configuration
+VAD_ENABLED = os.getenv("VAD_ENABLED", "true").lower() == "true"
+VAD_MODEL = os.getenv("VAD_MODEL", "./whisper/whisper.cpp/models/ggml-silero-v5.1.2.bin")
 
 # Gotify configuration
 NODE_NAME = os.getenv("NODE_NAME", "UnknownNode")
@@ -59,7 +64,7 @@ def send_gotify_error(title: str, message: str) -> None:
         try:
             resp = requests.post(
                 f"{GOTIFY_URL}/message",
-                json={"title": title, "message": message, "priority": 5},
+                json={"title": title, "message": message, "priority": 7},
                 headers={"X-Gotify-Key": GOTIFY_KEY},
                 timeout=5,
             )
@@ -67,6 +72,22 @@ def send_gotify_error(title: str, message: str) -> None:
                 print(f"Gotify error post failed: {resp.status_code}")
         except Exception as e:
             print(f"Exception sending Gotify error: {e}")
+
+def tail_text(text: str, n: int = 20) -> str:
+    """Return the last n lines of text."""
+    if not text:
+        return ""
+    lines = text.splitlines()
+    return "\n".join(lines[-n:])
+
+def compose_error_message(console_msg: str, stderr_text: str) -> str:
+    """
+    Prefer the exact console error message; if available, append a tail of stderr.
+    """
+    tail = tail_text(stderr_text, 20)
+    if tail:
+        return f"{console_msg}\n--- stderr tail ---\n{tail}"
+    return console_msg
 
 # Ensure directories exist
 os.makedirs("processed_uploaded", exist_ok=True)
@@ -149,8 +170,9 @@ def retry_failed():
                 with open(vtt_path, "r") as f:
                     vtt_content = f.read()
             except Exception as e:
-                print(f"Failed to read VTT for {task_id}: {e}")
-                send_gotify_error(NODE_NAME, f"Failed to read VTT for {task_id}: {e}")
+                msg = f"Failed to read VTT for {task_id}: {e}"
+                print(msg)
+                send_gotify_error(NODE_NAME, msg)
                 continue
 
             posted = False
@@ -185,8 +207,9 @@ def retry_failed():
                     except Exception as e:
                         print(f"Failed to remove failed report for {task_id}: {e}")
             else:
-                print(f"Failed to retry VTT upload for {task_id} after 3 attempts")
-                send_gotify_error(NODE_NAME, f"Failed to retry VTT upload for {task_id} after 3 attempts")
+                msg = f"Failed to retry VTT upload for {task_id} after 3 attempts"
+                print(msg)
+                send_gotify_error(NODE_NAME, msg)
                 # Since VTT post failed again, try to report error
                 error_post_data = {"id": task_id}
                 error_post_kwargs = {"json": error_post_data, "timeout": 10}
@@ -239,8 +262,9 @@ def retry_failed():
                 except Exception as e:
                     print(f"Failed to remove failed report file for {task_id}: {e}")
             else:
-                print(f"Failed to retry error report for {task_id} after 3 attempts")
-                send_gotify_error(NODE_NAME, f"Failed to retry error report for {task_id} after 3 attempts")
+                msg = f"Failed to retry error report for {task_id} after 3 attempts"
+                print(msg)
+                send_gotify_error(NODE_NAME, msg)
 
 # -----------------------------
 # Main processing loop
@@ -297,6 +321,10 @@ def process_loop(check_timeout=None):
             current_time_taken = 0.0
             current_start_time = None
 
+            # Buffers for subprocess stderr tails
+            ffmpeg_stderr = ""
+            whisper_stderr = ""
+
             try:
                 # Save MP3
                 with open(mp3_file, "wb") as f:
@@ -322,24 +350,23 @@ def process_loop(check_timeout=None):
                 audio_seconds = float(duration_output.strip())
                 current_audio_minutes = audio_seconds / 60.0
 
-                # Convert MP3 to WAV
+                # Convert MP3 to WAV (capture stderr)
                 ffmpeg_cmd = ["ffmpeg", "-y", "-i", mp3_file, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_file]
-                process = subprocess.Popen(ffmpeg_cmd)
+                process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 current_process = process
-                rc = process.wait()
+                out, err = process.communicate()
                 current_process = None
-                if rc != 0:
-                    raise subprocess.CalledProcessError(rc, ffmpeg_cmd)
+                ffmpeg_stderr = err or ""
+                if process.returncode != 0:
+                    raise subprocess.CalledProcessError(process.returncode, ffmpeg_cmd, output=out, stderr=err)
 
-                # Run whisper.cpp (removed --vad-model; keep --vad)
-                current_start_time = time.time()
+                # Build whisper command
                 whisper_cmd = [
                     "./whisper/whisper.cpp/build/bin/whisper-cli",
                     "-m",
                     "./whisper/whisper.cpp/models/ggml-medium.bin",
                     "--language",
                     language,
-                    "--vad",
                     "-bs",
                     "5",
                     "--entropy-thold",
@@ -350,12 +377,22 @@ def process_loop(check_timeout=None):
                     wav_file,
                     "-ovtt",
                 ]
-                process = subprocess.Popen(whisper_cmd)
+
+                # Enable VAD only if configured and model exists
+                if VAD_ENABLED:
+                    if not os.path.exists(VAD_MODEL):
+                        raise FileNotFoundError(f"VAD model not found at {VAD_MODEL}")
+                    whisper_cmd.extend(["--vad", "--vad-model", VAD_MODEL])
+
+                # Run whisper.cpp (capture stderr)
+                current_start_time = time.time()
+                process = subprocess.Popen(whisper_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 current_process = process
-                rc = process.wait()
+                out, err = process.communicate()
                 current_process = None
-                if rc != 0:
-                    raise subprocess.CalledProcessError(rc, whisper_cmd)
+                whisper_stderr = err or ""
+                if process.returncode != 0:
+                    raise subprocess.CalledProcessError(process.returncode, whisper_cmd, output=out, stderr=err)
 
                 end_time = time.time()
                 current_time_taken = end_time - current_start_time
@@ -367,9 +404,13 @@ def process_loop(check_timeout=None):
                     vtt_content = f.read()
 
             except Exception as e:
-                print(f"Processing failed: {e}")
+                console_msg = f"Processing failed: {e}"
+                print(console_msg)
+                # Prefer console_msg, append stderr tail if present
+                extra_tail = whisper_stderr or ffmpeg_stderr
+                notif_msg = compose_error_message(console_msg, extra_tail)
                 log_to_csv(task_id, language, current_time_taken, current_audio_minutes, "failure", str(e))
-                send_gotify_error(NODE_NAME, f"Processing failed for {task_id}: {e}")
+                send_gotify_error(NODE_NAME, notif_msg)
 
                 # Send to /error
                 error_post_data = {"id": task_id}
@@ -437,8 +478,11 @@ def process_loop(check_timeout=None):
                     except Exception as e:
                         print(f"Failed to move VTT to processed_uploaded for {task_id}: {e}")
             else:
+                msg = f"Failed to post result for {task_id} after 3 attempts"
+                print(msg)
                 log_to_csv(task_id, language, time_taken, current_audio_minutes, "failure", "Failed to post result after 3 attempts")
-                send_gotify_error(NODE_NAME, f"Failed to post result for {task_id} after 3 attempts")
+                # Prefer console message, no subprocess stderr here
+                send_gotify_error(NODE_NAME, msg)
                 # Move the VTT to processed_not_uploaded to avoid losing work
                 if os.path.exists(vtt_file):
                     try:
@@ -488,8 +532,10 @@ def process_loop(check_timeout=None):
                 break
 
         except Exception as e:
-            print(f"Exception in loop: {e}")
-            send_gotify_error(NODE_NAME, f"Exception in loop: {e}")
+            console_msg = f"Exception in loop: {e}"
+            print(console_msg)
+            # No subprocess stderr here—send console message only
+            send_gotify_error(NODE_NAME, console_msg)
             time.sleep(10)
             if interrupted:
                 break
