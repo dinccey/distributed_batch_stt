@@ -34,7 +34,7 @@ case $backend in
         sudo dnf install -y vulkan-loader vulkan-loader-devel vulkan-headers vulkan-tools \
             mesa-vulkan-drivers glslc vulkan-validation-layers vulkan-validation-layers-devel \
             libshaderc-devel
-        build_flags="-DGGML_VULKAN=1 -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS"
+        build_flags="-DGGML_VULKAN=1 -DGGML_BLAS=OFF"
         ;;
     cuda)
         echo "Building for CUDA (NVIDIA) backend"
