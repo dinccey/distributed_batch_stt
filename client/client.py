@@ -16,6 +16,9 @@ import threading
 import croniter
 from collections import deque
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # -----------------------------
 # Configuration (from env vars)
 # -----------------------------
@@ -112,10 +115,10 @@ def print_subprocess_output(label: str, stdout_deque: deque, stderr_deque: deque
     else:
         print("  stderr: <empty>")
 
-def stream_subprocess(proc, stdout_deque: deque, stderr_deque: deque, print_stdout_live: bool = False):
+def stream_subprocess(proc, stdout_deque: deque, stderr_deque: deque, print_stdout_live: bool = False, print_stderr_live: bool = False):
     """
     Read stdout and stderr from proc line-by-line in threads.
-    If print_stdout_live is True, stdout lines are printed to console as received.
+    If print_stdout_live/print_stderr_live is True, lines are printed to console as received.
     Both stdout and stderr lines appended to respective deques (bounded).
     """
     def _reader(pipe, dq, print_live):
@@ -141,7 +144,7 @@ def stream_subprocess(proc, stdout_deque: deque, stderr_deque: deque, print_stdo
         t_out.start()
         threads.append(t_out)
     if proc.stderr:
-        t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_deque, False), daemon=True)
+        t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_deque, print_stderr_live), daemon=True)
         t_err.start()
         threads.append(t_err)
 
@@ -481,7 +484,7 @@ def process_loop(check_timeout=None):
                 proc = subprocess.Popen(whisper_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 current_process = proc
                 # stream_subprocess reads stdout and stderr concurrently, printing stdout live
-                rc = stream_subprocess(proc, whisper_stdout_deque, whisper_stderr_deque, print_stdout_live=True)
+                rc = stream_subprocess(proc, whisper_stdout_deque, whisper_stderr_deque, print_stdout_live=True, print_stderr_live=True)
                 current_process = None
                 if rc != 0:
                     # print captured tails for debugging

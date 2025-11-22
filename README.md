@@ -27,11 +27,6 @@ cp client/.env.example client/.env
 # Edit client/.env as needed
 ```
 
-You can load the environment variables with:
-
-```sh
-source client/load_env.sh
-```
 The client supports cron scheduling. The ENV variable CRON can be set to a cron schedule that denotes a start time. THe variable PROCESSING_HOURS is a value in hours that denotes for how long the client will be transcriing for since starting.
 
 ---
