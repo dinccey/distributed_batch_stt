@@ -68,6 +68,18 @@ else
 fi
 cd whisper.cpp
 
+# If Vulkan and Intel GPU 13th gen or older, disable flash attention
+if [ "$backend" = "vulkan" ]; then
+    read -p "Is this for an Intel GPU 13th gen or older? (y/n) [y]: " intel_old
+    intel_old=${intel_old:-y}
+    if [ "$intel_old" = "y" ]; then
+        echo "Disabling flash attention for Intel Xe stability..."
+        sed -i 's/bool\s\+flash_attn\s*=\s*true;/bool flash_attn = false;/g' examples/cli/cli.cpp
+        git add examples/cli/cli.cpp
+        git commit -m "Disable flash attention for Intel Xe stability" || echo "No changes to commit (already patched)."
+    fi
+fi
+
 # VAD model (optional)
 bash ./models/download-vad-model.sh silero-v5.1.2 || echo "VAD optional - skipped"
 
