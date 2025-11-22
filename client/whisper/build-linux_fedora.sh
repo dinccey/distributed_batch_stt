@@ -21,9 +21,11 @@ echo "Installing/updating common system dependencies..."
 sudo dnf update -y
 sudo dnf install -y git cmake gcc gcc-c++ make python3 python3-pip python3-devel wget tar \
     zlib-devel bzip2 bzip2-devel readline-devel sqlite sqlite-devel openssl-devel tk-devel \
-    libffi-devel xz-devel curl openblas-devel ffmpeg
+    libffi-devel xz-devel curl openblas-devel
     
-pip install croniter requests
+sudo dnf install ffmpeg --skip-broken
+
+pip install croniter requests dotenv
 
 # Backend-specific
 case $backend in
