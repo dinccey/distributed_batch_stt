@@ -1,5 +1,6 @@
 # client.py
 # Edited: stream whisper stdout live to CLI, still capture stderr/stdout tails for notifications.
+# Added: Before processing a task, check processed.csv for failures on that ID. If >1 failure, skip (no report, let server timeout) and fetch next.
 
 import requests
 import subprocess
@@ -198,6 +199,19 @@ def log_to_csv(file_id, language, time_taken, audio_minutes, status, reason):
             }
         )
 
+def count_failures_for_id(task_id: str) -> int:
+    """Count number of 'failure' entries for a task_id in processed.csv."""
+    if not os.path.exists("processed.csv"):
+        return 0
+
+    failures = 0
+    with open("processed.csv", "r") as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            if row["file_id"] == task_id and row["status"] == "failure":
+                failures += 1
+    return failures
+
 # -----------------------------
 # Files cleanup
 # -----------------------------
@@ -365,6 +379,12 @@ def process_loop(check_timeout=None):
                 continue
 
             print(f"Received task ID: {task_id}, Language: {language}")
+
+            # Check failure count before processing
+            failure_count = count_failures_for_id(task_id)
+            if failure_count > 2:
+                print(f"Task {task_id} has failed {failure_count} times already. Skipping (let server timeout).")
+                continue  # Fetch next task immediately
 
             mp3_file = f"{task_id}.mp3"
             wav_file = f"{task_id}.wav"
