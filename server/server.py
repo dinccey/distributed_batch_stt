@@ -28,6 +28,7 @@ CSV_FILE = 'processed.csv'
 
 TASK_TIMEOUT = 360000  # 100 hour for task expiration; adjust as needed
 SYNC_INTERVAL = 300  # 5 minutes for directory sync
+MAX_ATTEMPTS_PER_FILE = 10  # Max validation attempts per file before permanent skip
 
 def log_message(msg: str):
     today = datetime.date.today().isoformat()
@@ -50,7 +51,8 @@ def init_db():
             status TEXT DEFAULT 'pending',
             assigned_at REAL,
             assigned_ip TEXT,
-            task_id TEXT
+            task_id TEXT,
+            attempts INTEGER DEFAULT 0
         )
     ''')
     conn.commit()
@@ -75,7 +77,11 @@ def set_task_failed(path: str, error: str = 'Unknown error'):
     cur = conn.cursor()
     cur.execute("""
         UPDATE tasks
-        SET status = 'failed', assigned_at = NULL, assigned_ip = NULL, task_id = NULL
+        SET status = 'failed',
+            assigned_at = NULL,
+            assigned_ip = NULL,
+            task_id = NULL,
+            attempts = attempts + 1
         WHERE path = ?
     """, (path,))
     conn.commit()
@@ -168,53 +174,72 @@ def startup_event():
 @app.get("/task")
 def get_task(request: Request):
     ip = request.client.host
-    attempts = 0
-    max_attempts = 10  # Increased slightly for safety
-    while attempts < max_attempts:
-        file = find_file_to_process(ip)
-        if file is None:
-            log_message(f"No available file for IP: {ip}")
-            return Response(status_code=204)
-        
-        path_str = str(file)
-        id_ = hashlib.md5(path_str.encode()).hexdigest()
-        json_file = file.with_suffix('.json')
-        
-        try:
-            if not json_file.exists():
-                raise ValueError("Missing JSON")
-            
-            lang_data = json.loads(json_file.read_text())
-            lang = lang_data.get('sql_params').get('language')
-            if not lang:
-                raise ValueError("Missing language key")
-        
-        except Exception as e:
-            error_str = str(e)
-            log_message(f"Error with JSON for {file}: {error_str} from IP: {ip}")
-            log_to_csv(path_str, id_, ip, error_str)
-            set_task_failed(path_str, error_str)
-            attempts += 1
-            continue
-        
-        # If we reach here, the file is good
-        log_message(f"Assigned file {path_str} (ID: {id_}, Lang: {lang}) to IP: {ip}")
-        
-        headers = {
-            'X-Task-ID': id_,
-            'X-Language': lang
-        }
-        
-        def iterfile():
-            with open(file, "rb") as f:
-                while chunk := f.read(8192):
-                    yield chunk
-        
-        return StreamingResponse(iterfile(), media_type="audio/mpeg", headers=headers)
-    
-    # If max attempts reached, return no content
-    log_message(f"Max attempts reached for IP: {ip}")
-    return Response(status_code=204)
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    # Only pick files that have not exceeded max attempts
+    cur.execute("""
+        SELECT path FROM tasks
+        WHERE status = 'pending' AND attempts < ?
+        LIMIT 1
+    """, (MAX_ATTEMPTS_PER_FILE,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        log_message(f"No available file for IP: {ip}")
+        return Response(status_code=204)
+
+    path_str = row[0]
+    file = Path(path_str)
+    id_ = hashlib.md5(path_str.encode()).hexdigest()
+    json_file = file.with_suffix('.json')
+
+    # Validate JSON
+    try:
+        if not json_file.exists():
+            raise ValueError("Missing JSON")
+
+        lang_data = json.loads(json_file.read_text())
+        lang = lang_data.get('sql_params').get('language')
+        if not lang:
+            raise ValueError("Missing language key")
+
+    except Exception as e:
+        error_str = str(e)
+        log_message(f"Error with JSON for {file}: {error_str} from IP: {ip}")
+        log_to_csv(path_str, id_, ip, error_str)
+        set_task_failed(path_str, error_str)
+        return Response(status_code=204)
+
+    # Assign task
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE tasks
+        SET status = 'in_progress',
+            assigned_at = ?,
+            assigned_ip = ?,
+            task_id = ?
+        WHERE path = ?
+    """, (time.time(), ip, id_, path_str))
+    conn.commit()
+    conn.close()
+
+    log_message(f"Assigned file {path_str} (ID: {id_}, Lang: {lang}) to IP: {ip}")
+
+    headers = {
+        'X-Task-ID': id_,
+        'X-Language': lang
+    }
+
+    def iterfile():
+        with open(file, "rb") as f:
+            while chunk := f.read(8192):
+                yield chunk
+
+    return StreamingResponse(iterfile(), media_type="audio/mpeg", headers=headers)
 
 @app.post("/result")
 async def post_result(request: Request):
