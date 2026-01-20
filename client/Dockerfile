@@ -113,5 +113,5 @@ WORKDIR /app
 
 # Expose any ports if needed (none for this client)
 
-# Default command
-CMD ["python3", "client.py"]
+# Default command - use -u for unbuffered output so logs appear in real-time
+CMD ["python3", "-u", "client.py"]

@@ -129,7 +129,7 @@ def stream_subprocess(proc, stdout_deque: deque, stderr_deque: deque, print_stdo
                 clean = line.rstrip("\n")
                 dq.append(clean)
                 if print_live:
-                    print(clean)
+                    print(clean, flush=True)
         except Exception:
             pass
         finally:
