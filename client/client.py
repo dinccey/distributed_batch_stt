@@ -173,9 +173,29 @@ interrupted = False
 # -----------------------------
 # Signal handling
 # -----------------------------
+def report_interrupted_task():
+    """Report any in-progress task to the server as an error when interrupted."""
+    global current_task_id, current_language, current_time_taken, current_audio_minutes
+    if current_task_id:
+        try:
+            print(f"Reporting interrupted task {current_task_id} to server...")
+            error_post_data = {"id": current_task_id}
+            error_post_kwargs = {"json": error_post_data, "timeout": 5}
+            if auth:
+                error_post_kwargs["auth"] = auth
+            error_response = requests.post(error_url, **error_post_kwargs)
+            if error_response.status_code == 200:
+                print("Interrupted task reported to server")
+            else:
+                print(f"Failed to report interrupted task: {error_response.status_code}")
+        except Exception as e:
+            print(f"Exception reporting interrupted task: {e}")
+
 def signal_handler(sig, frame):
     global interrupted
-    print("Interrupted! The current processing will finish before exiting.")
+    sig_name = "SIGTERM (container stop)" if sig == signal.SIGTERM else "SIGINT (Ctrl+C)"
+    print(f"Interrupted by {sig_name}! Reporting any in-progress task to server...")
+    report_interrupted_task()
     interrupted = True
 
 signal.signal(signal.SIGINT, signal_handler)
