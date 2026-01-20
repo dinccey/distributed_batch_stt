@@ -89,47 +89,60 @@ def set_task_failed(path: str, error: str = 'Unknown error'):
     conn.commit()
     conn.close()
 
+def validate_task_files(mp3_path: str) -> bool:
+    """Check if both JSON metadata file and VTT output don't exist."""
+    json_path = os.path.splitext(mp3_path)[0] + '.json'
+    vtt_path = os.path.splitext(mp3_path)[0] + '.vtt'
+    
+    # Must have JSON, must not have VTT
+    return os.path.exists(json_path) and not os.path.exists(vtt_path)
+
 def sync_dir_with_db():
     log_message("Starting directory sync")
     conn = get_db_connection()
     cur = conn.cursor()
     added = 0
     reset = 0
+    skipped = 0
     for dirpath, dirnames, filenames in os.walk(AUDIO_DIR):
         for filename in filenames:
             if filename.lower().endswith('.mp3'):
                 path_str = os.path.join(dirpath, filename)
-                vtt_path = os.path.splitext(path_str)[0] + '.vtt'
-                if not os.path.exists(vtt_path):
-                    cur.execute("SELECT status, assigned_at FROM tasks WHERE path = ?", (path_str,))
-                    row = cur.fetchone()
-                    do_reset = False
-                    if row is None:
-                        cur.execute("INSERT INTO tasks (path, status) VALUES (?, 'pending')", (path_str,))
-                        added += 1
-                    else:
-                        current_status = row[0]
-                        if current_status == 'pending':
-                            continue
-                        if current_status == 'in_progress':
-                            if time.time() - row[1] > TASK_TIMEOUT:
-                                do_reset = True
-                                log_message(f"Expiring in_progress task during sync: {path_str}")
-                            else:
-                                continue
-                        else:  # failed or completed, but vtt missing, reset
+                
+                # Validate that JSON exists before considering as task
+                if not validate_task_files(path_str):
+                    skipped += 1
+                    continue
+                
+                cur.execute("SELECT status, assigned_at FROM tasks WHERE path = ?", (path_str,))
+                row = cur.fetchone()
+                do_reset = False
+                if row is None:
+                    cur.execute("INSERT INTO tasks (path, status) VALUES (?, 'pending')", (path_str,))
+                    added += 1
+                else:
+                    current_status = row[0]
+                    if current_status == 'pending':
+                        continue
+                    if current_status == 'in_progress':
+                        if time.time() - row[1] > TASK_TIMEOUT:
                             do_reset = True
-                        if do_reset:
-                            cur.execute("""
-                                UPDATE tasks
-                                SET status = 'pending', assigned_at = NULL, assigned_ip = NULL, task_id = NULL
-                                WHERE path = ?
-                            """, (path_str,))
-                            reset += 1
-                            log_message(f"Reset task to pending: {path_str}")
+                            log_message(f"Expiring in_progress task during sync: {path_str}")
+                        else:
+                            continue
+                    else:  # failed or completed, but vtt missing, reset
+                        do_reset = True
+                    if do_reset:
+                        cur.execute("""
+                            UPDATE tasks
+                            SET status = 'pending', assigned_at = NULL, assigned_ip = NULL, task_id = NULL
+                            WHERE path = ?
+                        """, (path_str,))
+                        reset += 1
+                        log_message(f"Reset task to pending: {path_str}")
     conn.commit()
     conn.close()
-    log_message(f"Directory sync completed: {added} added, {reset} reset")
+    log_message(f"Directory sync completed: {added} added, {reset} reset, {skipped} skipped (missing JSON)")
 
 def periodic_sync():
     while True:
