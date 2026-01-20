@@ -94,6 +94,11 @@ if $RUNTIME ps -a --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
     $RUNTIME rm $CONTAINER_NAME 2>/dev/null || true
 fi
 
+# Ensure directories exist and processed.csv is a file
+echo "Ensuring persistent data directories exist..."
+mkdir -p processed_uploaded processed_not_uploaded not_processed_failed_report
+touch processed.csv
+
 # Additional runtime arguments based on backend
 RUNTIME_ARGS=""
 
