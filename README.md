@@ -95,6 +95,77 @@ The client will poll the server for tasks, process them, and upload results. If 
 
 ---
 
+### D. Docker / Podman (Recommended for Linux)
+
+For a containerized client setup that works anywhere, use Docker or Podman. This provides isolation and reproducible builds across different systems.
+
+#### **Quick Start:**
+
+1. **Prepare your environment:**
+   ```sh
+   cd client
+   cp .env.example .env
+   # Edit .env with your server configuration
+   ```
+
+2. **Build the Docker image:**
+   ```sh
+   chmod +x build.sh run.sh
+   ./build.sh
+   ```
+   - Select your container runtime (docker or podman)
+   - Select your backend (cpu, vulkan, cuda, or openvino)
+   - For Intel GPUs 13th gen or older with Vulkan, select 'yes' when prompted
+
+3. **Run the container:**
+   ```sh
+   ./run.sh
+   ```
+   - Select your container runtime (docker or podman)
+   - Select the backend to match your build
+   - The container will start and mount your `.env` file
+
+#### **What Gets Mounted:**
+- `processed_uploaded/` – Successfully uploaded VTT files
+- `processed_not_uploaded/` – Processed but not yet uploaded files
+- `not_processed_failed_report/` – Failed processing reports
+- `processed.csv` – Processing log (auto-created with headers if missing)
+- `.env` – Your environment configuration
+
+#### **Viewing Logs:**
+```sh
+# Docker
+docker logs -f distributed-batch-stt-client-<backend>
+
+# Podman
+podman logs -f distributed-batch-stt-client-<backend>
+```
+
+#### **Stopping/Starting:**
+```sh
+# Stop
+docker stop distributed-batch-stt-client-<backend>
+podman stop distributed-batch-stt-client-<backend>
+
+# Start
+docker start distributed-batch-stt-client-<backend>
+podman start distributed-batch-stt-client-<backend>
+
+# Remove
+docker rm -f distributed-batch-stt-client-<backend>
+podman rm -f distributed-batch-stt-client-<backend>
+```
+
+#### **Backend Selection:**
+- **cpu** – Works everywhere, uses OpenBLAS acceleration (slowest)
+- **vulkan** – AMD/Intel/NVIDIA GPUs, requires `/dev/dri` device (fastest for compatible GPUs)
+- **cuda** – NVIDIA GPUs only, requires nvidia-docker or proper GPU passthrough (very fast)
+- **openvino** – Intel CPUs/GPUs, requires `/dev/dri` device for GPU acceleration
+
+See [DOCKER_README.md](client/DOCKER_README.md) for detailed Docker/Podman documentation.
+
+---
+
 ## 2. Server Setup
 
 The server is a FastAPI app that distributes audio tasks and collects results. It is designed to run in a Docker container for easy deployment and persistence.
