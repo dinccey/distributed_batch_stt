@@ -100,6 +100,9 @@ mkdir -p processed_uploaded processed_not_uploaded not_processed_failed_report
 if [ ! -f "processed.csv" ]; then
     echo "file_id,language,time_taken,audio_minutes,status,reason" > processed.csv
 fi
+# Ensure proper permissions for container access
+chmod 666 processed.csv
+chmod 777 processed_uploaded processed_not_uploaded not_processed_failed_report
 
 # Additional runtime arguments based on backend
 RUNTIME_ARGS=""
@@ -121,10 +124,10 @@ elif [ "$BACKEND" = "openvino" ]; then
 fi
 
 # Volume mounts for persistent data
-VOLUME_ARGS="-v $(pwd)/processed_uploaded:/app/processed_uploaded:Z"
-VOLUME_ARGS="$VOLUME_ARGS -v $(pwd)/processed_not_uploaded:/app/processed_not_uploaded:Z"
-VOLUME_ARGS="$VOLUME_ARGS -v $(pwd)/not_processed_failed_report:/app/not_processed_failed_report:Z"
-VOLUME_ARGS="$VOLUME_ARGS -v $(pwd)/processed.csv:/app/processed.csv:Z"
+VOLUME_ARGS="-v $(pwd)/processed_uploaded:/app/processed_uploaded:z"
+VOLUME_ARGS="$VOLUME_ARGS -v $(pwd)/processed_not_uploaded:/app/processed_not_uploaded:z"
+VOLUME_ARGS="$VOLUME_ARGS -v $(pwd)/not_processed_failed_report:/app/not_processed_failed_report:z"
+VOLUME_ARGS="$VOLUME_ARGS -v $(pwd)/processed.csv:/app/processed.csv:z"
 
 # Pass .env file if it exists
 if [ -f ".env" ]; then
