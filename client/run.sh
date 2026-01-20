@@ -121,10 +121,10 @@ elif [ "$BACKEND" = "openvino" ]; then
 fi
 
 # Volume mounts for persistent data
-VOLUME_ARGS="-v $(pwd)/processed_uploaded:/app/processed_uploaded"
-VOLUME_ARGS="$VOLUME_ARGS -v $(pwd)/processed_not_uploaded:/app/processed_not_uploaded"
-VOLUME_ARGS="$VOLUME_ARGS -v $(pwd)/not_processed_failed_report:/app/not_processed_failed_report"
-VOLUME_ARGS="$VOLUME_ARGS -v $(pwd)/processed.csv:/app/processed.csv"
+VOLUME_ARGS="-v $(pwd)/processed_uploaded:/app/processed_uploaded:Z"
+VOLUME_ARGS="$VOLUME_ARGS -v $(pwd)/processed_not_uploaded:/app/processed_not_uploaded:Z"
+VOLUME_ARGS="$VOLUME_ARGS -v $(pwd)/not_processed_failed_report:/app/not_processed_failed_report:Z"
+VOLUME_ARGS="$VOLUME_ARGS -v $(pwd)/processed.csv:/app/processed.csv:Z"
 
 # Pass .env file if it exists
 if [ -f ".env" ]; then
