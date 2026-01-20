@@ -59,9 +59,8 @@ RUN mkdir -p processed_uploaded processed_not_uploaded not_processed_failed_repo
 # Build whisper.cpp based on backend
 WORKDIR /app/whisper
 RUN MODEL="medium" && \
-    if [ ! -d "whisper.cpp" ]; then \
-    git clone https://github.com/ggerganov/whisper.cpp.git; \
-    fi && \
+    rm -rf whisper.cpp && \
+    git clone https://github.com/ggerganov/whisper.cpp.git && \
     cd whisper.cpp && \
     # If Vulkan and Intel GPU 13th gen or older, disable flash attention
     if [ "$BACKEND" = "vulkan" ]; then \
@@ -69,6 +68,8 @@ RUN MODEL="medium" && \
     if [ "$INTEL_OLD_GPU" = "y" ]; then \
     echo "Disabling flash attention for Intel Xe stability..."; \
     sed -i 's/bool\s\+flash_attn\s*=\s*true;/bool flash_attn = false;/g' examples/cli/cli.cpp; \
+    git config user.email "docker@build.local"; \
+    git config user.name "Docker Build"; \
     git add examples/cli/cli.cpp; \
     git commit -m "Disable flash attention for Intel Xe stability" || echo "No changes to commit (already patched)."; \
     fi; \
