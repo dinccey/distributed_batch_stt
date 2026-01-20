@@ -6,6 +6,7 @@ FROM fedora:43
 
 # Build argument for backend selection
 ARG BACKEND=cpu
+ARG INTEL_OLD_GPU=y
 ENV BACKEND=${BACKEND}
 
 # Set working directory
@@ -62,6 +63,16 @@ RUN MODEL="medium" && \
     git clone https://github.com/ggerganov/whisper.cpp.git; \
     fi && \
     cd whisper.cpp && \
+    # If Vulkan and Intel GPU 13th gen or older, disable flash attention
+    if [ "$BACKEND" = "vulkan" ]; then \
+    INTEL_OLD_GPU=${INTEL_OLD_GPU:-y}; \
+    if [ "$INTEL_OLD_GPU" = "y" ]; then \
+    echo "Disabling flash attention for Intel Xe stability..."; \
+    sed -i 's/bool\s\+flash_attn\s*=\s*true;/bool flash_attn = false;/g' examples/cli/cli.cpp; \
+    git add examples/cli/cli.cpp; \
+    git commit -m "Disable flash attention for Intel Xe stability" || echo "No changes to commit (already patched)."; \
+    fi; \
+    fi && \
     # Download VAD model (optional)
     bash ./models/download-vad-model.sh silero-v5.1.2 || echo "VAD optional - skipped" && \
     # Download GGML model

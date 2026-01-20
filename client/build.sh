@@ -40,6 +40,14 @@ case $choice in
         ;;
 esac
 
+# If Vulkan, ask about Intel GPU
+INTEL_OLD_GPU="n"
+if [ "$BACKEND" = "vulkan" ]; then
+    echo ""
+    read -p "Is this for an Intel GPU 13th gen or older? (y/n) [y]: " INTEL_OLD_GPU
+    INTEL_OLD_GPU=${INTEL_OLD_GPU:-y}
+fi
+
 echo ""
 echo "Building Docker image for backend: $BACKEND"
 echo ""
@@ -56,6 +64,7 @@ echo ""
 
 docker build \
     --build-arg BACKEND=$BACKEND \
+    --build-arg INTEL_OLD_GPU=$INTEL_OLD_GPU \
     -t $IMAGE_FULL \
     -t $IMAGE_LATEST \
     -f Dockerfile \
