@@ -18,6 +18,8 @@ import json
 import csv
 import sqlite3
 import threading
+import signal
+import sys
 
 app = FastAPI()
 
@@ -170,6 +172,20 @@ def startup_event():
     # Start periodic sync in background
     thread = threading.Thread(target=periodic_sync, daemon=True)
     thread.start()
+    log_message("Server started successfully")
+
+@app.on_event("shutdown")
+def shutdown_event():
+    log_message("Server shutting down gracefully...")
+
+def signal_handler(sig, frame):
+    sig_name = "SIGTERM (container stop)" if sig == signal.SIGTERM else "SIGINT (Ctrl+C)"
+    log_message(f"Received {sig_name}, initiating graceful shutdown...")
+    sys.exit(0)
+
+# Register signal handlers for graceful shutdown
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 @app.get("/task")
 def get_task(request: Request):
