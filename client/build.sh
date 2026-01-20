@@ -10,6 +10,32 @@ echo "  Client Docker Image Builder"
 echo "======================================"
 echo ""
 
+# Ask for container runtime
+echo "Select the container runtime:"
+echo "  1) docker"
+echo "  2) podman"
+echo ""
+
+read -p "Enter your choice (1-2) [1]: " runtime_choice
+runtime_choice=${runtime_choice:-1}
+
+case $runtime_choice in
+    1)
+        RUNTIME="docker"
+        ;;
+    2)
+        RUNTIME="podman"
+        ;;
+    *)
+        echo "Invalid choice. Defaulting to docker."
+        RUNTIME="docker"
+        ;;
+esac
+
+echo ""
+echo "Using container runtime: $RUNTIME"
+echo ""
+
 # Ask for backend selection
 echo "Select the backend architecture to build for:"
 echo "  1) cpu      - CPU backend (OpenBLAS accelerated)"
@@ -62,7 +88,7 @@ IMAGE_LATEST="${IMAGE_NAME}:${BACKEND}-latest"
 echo "Building: $IMAGE_FULL"
 echo ""
 
-docker build \
+$RUNTIME build \
     --build-arg BACKEND=$BACKEND \
     --build-arg INTEL_OLD_GPU=$INTEL_OLD_GPU \
     -t $IMAGE_FULL \
@@ -74,6 +100,7 @@ echo ""
 echo "======================================"
 echo "  Build Complete!"
 echo "======================================"
+echo "Runtime: $RUNTIME"
 echo "Image tags:"
 echo "  - $IMAGE_FULL"
 echo "  - $IMAGE_LATEST"

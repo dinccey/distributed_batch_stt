@@ -211,7 +211,7 @@ def count_failures_for_id(task_id: str) -> int:
     with open("processed.csv", "r") as csvfile:
         reader = csv.DictReader(csvfile)
         for row in reader:
-            if row["file_id"] == task_id and row["status"] == "failure":
+            if row.get("file_id") == task_id and row.get("status") == "failure":
                 failures += 1
     return failures
 
