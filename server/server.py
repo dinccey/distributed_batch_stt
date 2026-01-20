@@ -89,13 +89,24 @@ def set_task_failed(path: str, error: str = 'Unknown error'):
     conn.commit()
     conn.close()
 
-def validate_task_files(mp3_path: str) -> bool:
-    """Check if both JSON metadata file and VTT output don't exist."""
+def validate_task_files(mp3_path: str) -> tuple[bool, str]:
+    """
+    Check if task is valid for processing.
+    Returns: (is_valid: bool, reason: str)
+    - (False, "completed") if VTT already exists
+    - (False, "missing_json") if JSON doesn't exist
+    - (True, "valid") if both conditions met
+    """
     json_path = os.path.splitext(mp3_path)[0] + '.json'
     vtt_path = os.path.splitext(mp3_path)[0] + '.vtt'
     
-    # Must have JSON, must not have VTT
-    return os.path.exists(json_path) and not os.path.exists(vtt_path)
+    if os.path.exists(vtt_path):
+        return False, "completed"
+    
+    if not os.path.exists(json_path):
+        return False, "missing_json"
+    
+    return True, "valid"
 
 def sync_dir_with_db():
     log_message("Starting directory sync")
@@ -103,15 +114,20 @@ def sync_dir_with_db():
     cur = conn.cursor()
     added = 0
     reset = 0
-    skipped = 0
+    skipped_completed = 0
+    skipped_missing_json = 0
     for dirpath, dirnames, filenames in os.walk(AUDIO_DIR):
         for filename in filenames:
             if filename.lower().endswith('.mp3'):
                 path_str = os.path.join(dirpath, filename)
                 
-                # Validate that JSON exists before considering as task
-                if not validate_task_files(path_str):
-                    skipped += 1
+                # Validate that files exist and are ready for processing
+                is_valid, reason = validate_task_files(path_str)
+                if not is_valid:
+                    if reason == "completed":
+                        skipped_completed += 1
+                    elif reason == "missing_json":
+                        skipped_missing_json += 1
                     continue
                 
                 cur.execute("SELECT status, assigned_at FROM tasks WHERE path = ?", (path_str,))
@@ -142,7 +158,7 @@ def sync_dir_with_db():
                         log_message(f"Reset task to pending: {path_str}")
     conn.commit()
     conn.close()
-    log_message(f"Directory sync completed: {added} added, {reset} reset, {skipped} skipped (missing JSON)")
+    log_message(f"Directory sync completed: {added} added, {reset} reset, {skipped_completed} already completed, {skipped_missing_json} missing JSON")
 
 def periodic_sync():
     while True:
