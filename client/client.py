@@ -236,8 +236,28 @@ def count_failures_for_id(task_id: str) -> int:
     return failures
 
 # -----------------------------
-# Files cleanup
+# Files cleanup and movement
 # -----------------------------
+def safe_move_file(src: str, dst: str) -> bool:
+    """
+    Safely move a file, handling cross-device links.
+    Works across different filesystems (common in Docker with mounted volumes).
+    """
+    try:
+        os.rename(src, dst)
+        return True
+    except OSError as e:
+        if e.errno == 18:  # Invalid cross-device link
+            try:
+                import shutil
+                shutil.move(src, dst)
+                return True
+            except Exception as move_e:
+                print(f"Failed to move {src} to {dst}: {move_e}")
+                return False
+        else:
+            raise
+
 def cleanup_files(files):
     for f in files:
         try:
@@ -293,7 +313,7 @@ def retry_failed():
 
             if posted:
                 try:
-                    os.rename(vtt_path, os.path.join(uploaded_dir, filename))
+                    safe_move_file(vtt_path, os.path.join(uploaded_dir, filename))
                 except Exception as e:
                     print(f"Failed to move VTT to uploaded for {task_id}: {e}")
                 failed_report_path = os.path.join(failed_report_dir, task_id)
@@ -587,7 +607,7 @@ def process_loop(check_timeout=None):
                 log_to_csv(task_id, language, time_taken, current_audio_minutes, "success", "")
                 if os.path.exists(vtt_file):
                     try:
-                        os.rename(vtt_file, os.path.join("processed_uploaded", f"{task_id}.vtt"))
+                        safe_move_file(vtt_file, os.path.join("processed_uploaded", f"{task_id}.vtt"))
                     except Exception as e:
                         print(f"Failed to move VTT to processed_uploaded for {task_id}: {e}")
             else:
@@ -597,7 +617,7 @@ def process_loop(check_timeout=None):
                 send_gotify_error(NODE_NAME, msg)
                 if os.path.exists(vtt_file):
                     try:
-                        os.rename(vtt_file, os.path.join("processed_not_uploaded", f"{task_id}.vtt"))
+                        safe_move_file(vtt_file, os.path.join("processed_not_uploaded", f"{task_id}.vtt"))
                     except Exception as e:
                         print(f"Failed to move VTT to processed_not_uploaded for {task_id}: {e}")
                 error_post_data = {"id": task_id}
